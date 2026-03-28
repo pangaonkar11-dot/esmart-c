@@ -1013,45 +1013,35 @@ function scoreSubtest(answers, items) {
 //  CLAUDE API — COMBINED NARRATIVE GENERATOR
 // ══════════════════════════════════════════════════════════════════════════════
 async function generateNarrative(fisResult, scss, childInfo) {
-  const prompt = `You are a senior child clinical psychologist at CIBS Nagpur writing a combined eSMART-C assessment report. Write in warm, professional language appropriate for both a clinician and a concerned parent.
-
-CHILD: ${childInfo.name||"Subject"}, Age ${childInfo.age||"—"} years, ${childInfo.gender==="F"?"Female":"Male"}, School: ${childInfo.school||"—"}
-
-PART 1 — CIBS-FIS (Fluid Intelligence, Cattell norms):
-IQ Estimate: ${fisResult.iq} | Mental Age: ${fisResult.ma} years | Band: ${fisResult.band}
-Percentile: ${fisResult.pct}th | Scale: ${fisResult.scale} | Items correct: ${fisResult.total}/${fisResult.maxRaw}
-Educational recommendation: ${fisResult.edu}
-
-PART 2 — SCSS (Dr Pangaonkar, CIBS Nagpur):
-SCSS Codes: Shape ${scss.meta.shapeCode} | Colour ${scss.meta.colorCode} | Shade ${scss.meta.shadeCode} | Smiley ${scss.meta.smileyCode}
-Primary Selections: ${scss.meta.firstShape} | ${scss.meta.firstColor} | ${scss.meta.firstShade} | ${scss.meta.firstSmiley}
-Cognitive Style (SCSS-CQ ${scss.d1.CQ}): ${scss.d1.primaryStyle} — ${scss.d1.procOrient}
-Personality: ${scss.d2.dsmCluster} (${scss.d2.dsmFeatures})
-EQ: ${scss.d3.EQSS} (${scss.d3.eqBand.band}) | ESI: ${scss.d3.ESI}/100
-Mental Health Index: ${scss.d4.MHI}/100 — ${scss.d4.phqAnalog.level}
-Risk Index: ${scss.d5.CRI}
-
-Write a JSON with these keys (no markdown, pure JSON):
-{
-  "cog_summary": "3-4 sentence paragraph about cognitive findings for parent, warm and clear language",
-  "cog_clinical": "2-3 sentence clinical interpretation of IQ result for clinician",
-  "scss_summary": "3-4 sentences about personality/emotional profile for parent",
-  "scss_clinical": "2-3 sentences technical personality interpretation for clinician",
-  "combined": "2-3 sentences integrating cognitive + personality findings",
-  "recommendations": "5 numbered recommendations separated by newline, concrete and practical"
-}`;
-
+  // Fallback narrative — always used if API unavailable (standalone deployment)
+  const fallback = {
+    cog_summary:`${childInfo.name||"The child"} completed the CIBS Fluid Intelligence Scale. The estimated IQ is ${fisResult.iq}, placing them at the ${fisResult.pct}th percentile for their age. Mental age is approximately ${fisResult.ma} years. ${fisResult.edu}`,
+    cog_clinical:`CIBS-FIS Score: IQ ${fisResult.iq} | MA ${fisResult.ma} yrs | ${fisResult.pct}th percentile | Band: ${fisResult.band} | Scale ${fisResult.scale}. Subtests: SER ${fisResult.ser||0}, CLS ${fisResult.cls||0}, MAT ${fisResult.mat||0}, CON ${fisResult.con||0}. Norms: Cattell (1949, 1973).`,
+    scss_summary:`The SCSS profile reveals a ${scss.d2.dsmCluster} personality style with ${scss.d3.eqBand?.band||"average"} emotional intelligence (EQ ${scss.d3.EQSS}). The child demonstrates ${scss.d1.primaryStyle} cognitive style. Mental health indicators are within ${scss.d4.MHI>=60?"normal":"monitored"} range.`,
+    scss_clinical:`SCSS-CQ: ${scss.d1.CQ} (${scss.d1.primaryStyle}). EQ-SS: ${scss.d3.EQSS} | ESI: ${scss.d3.ESI}/100. MHI: ${scss.d4.MHI}/100 (${scss.d4.phqAnalog?.level||"—"}). Risk: ${scss.d5?.CRI||"Low"}. DSM cluster: ${scss.d2.dsmCluster}.`,
+    combined:`Combined cognitive and personality profile suggests ${fisResult.band} intellectual functioning with ${scss.d2.dsmCluster} interpersonal style. Emotional regulation index (ESI ${scss.d3.ESI}/100) and cognitive performance are consistent with developmental expectations for age ${childInfo.age||"—"}.`,
+    recommendations:`1. Share this report with the class teacher and school counsellor for educational planning.
+2. Re-assess cognitive function in 12 months or sooner if academic concerns arise.
+3. ${fisResult.iq<85?"Consider referral to educational psychologist for detailed evaluation.":"Continue to encourage strengths identified in this assessment."}
+4. Monitor emotional wellbeing; ensure the child has trusted adults to speak with.
+5. Parents are encouraged to attend a CIBS feedback session for detailed interpretation.`
+  };
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(()=>controller.abort(), 8000);
     const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ model:"claude-sonnet-4-20250514", max_tokens:1200, messages:[{role:"user",content:prompt}] })
+      method:"POST", signal:controller.signal,
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1200,messages:[{role:"user",content:`Write a JSON clinical report for a child named ${childInfo.name||"Subject"}, IQ ${fisResult.iq}, MA ${fisResult.ma} yrs, SCSS EQ ${scss.d3.EQSS}. Keys: cog_summary, cog_clinical, scss_summary, scss_clinical, combined, recommendations. Pure JSON only.`}]})
     });
+    clearTimeout(timer);
     const data = await res.json();
     const txt = (data.content||[]).map(b=>b.text||"").join("");
     const clean = txt.replace(/```json|```/g,"").trim();
-    return JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}")+1));
+    const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}")+1));
+    return { ...fallback, ...parsed };
   } catch(e) {
-    return { cog_summary:"Cognitive assessment completed. Results require clinical interpretation.", cog_clinical:"CIBS-FIS score obtained. Full clinical evaluation recommended.", scss_summary:"Personality profile completed via SCSS.", scss_clinical:"SCSS profile requires clinical integration.", combined:"Combined assessment completed.", recommendations:"1. Review results with qualified clinician\n2. Follow recommended educational support\n3. Re-assess in 6 months\n4. Parental guidance as indicated\n5. School counsellor consultation" };
+    return fallback;
   }
 }
 
@@ -1357,8 +1347,9 @@ export default function App() {
     // Compute SCSS
     const scss = computeClinical(scssSeqs.shapeSeq, scssSeqs.colorSeq, scssSeqs.shadeSeq, scssSeqs.smileySeq);
     setScssResult(scss);
-    // Generate narrative
-    const narr = await generateNarrative(fis, scss, childInfo);
+    // Generate narrative — with 8 second timeout fallback
+    const narrativeTimeout = new Promise(resolve => setTimeout(() => resolve(null), 8000));
+    const narr = await Promise.race([generateNarrative(fis, scss, childInfo), narrativeTimeout]);
     setNarrative(narr);
     // ── Push to Google Sheets ──────────────────────────────────────────────
     if (APPS_SCRIPT_URL && !APPS_SCRIPT_URL.startsWith("PASTE_")) {
@@ -1475,12 +1466,11 @@ export default function App() {
             </div>
             {fld(t.grade,"grade")}
             {fld(t.school,"school")}
-            {fld(t.fileNo,"fileNo")}
             {fld(t.examiner,"examiner")}
           </div>
           <div style={{display:"flex",gap:10}}>
             <button onClick={()=>setScreen("role")} style={{flex:1,padding:"10px",borderRadius:9,background:"#f1f5f9",color:"#475569",border:"none",fontSize:13,cursor:"pointer"}}>{t.back}</button>
-            <button onClick={()=>setScreen("disclaimer")} disabled={!childInfo.name} style={{flex:2,padding:"12px",borderRadius:9,background:childInfo.name?"#0d5c6e":"#e2e8f0",color:childInfo.name?"#fff":"#94a3b8",border:"none",fontSize:14,fontWeight:700,cursor:childInfo.name?"pointer":"not-allowed"}}>{t.next}</button>
+            <button onClick={()=>setScreen("disclaimer")} disabled={!childInfo.gender} style={{flex:2,padding:"12px",borderRadius:9,background:childInfo.gender?"#0d5c6e":"#e2e8f0",color:childInfo.gender?"#fff":"#94a3b8",border:"none",fontSize:14,fontWeight:700,cursor:childInfo.name?"pointer":"not-allowed"}}>{t.next}</button>
           </div>
         </div>
       </div>
@@ -1721,6 +1711,14 @@ export default function App() {
               setSmileySeq(seq);
               runReport({shapeSeq,colorSeq,shadeSeq,smileySeq:seq});
             }}/>
+          {smileySeq.length>0 && (
+            <div style={{padding:"0 4px 16px"}}>
+              <button onClick={()=>runReport({shapeSeq,colorSeq,shadeSeq,smileySeq})}
+                style={{width:"100%",padding:"14px",borderRadius:10,background:"#1e3a5f",color:"white",border:"none",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+                ✅ Generate Report →
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );

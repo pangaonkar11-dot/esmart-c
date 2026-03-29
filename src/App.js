@@ -1473,7 +1473,7 @@ export default function App() {
           school:childInfo.school||"", grade:childInfo.grade||"",
           chief_complaint:"",
           // FIS scores
-          fis_iq:fis.IQ||"", fis_ma:fis.MA||"", fis_band:fis.band||"",
+          fis_iq:fis.iq||"", fis_ma:fis.ma||"", fis_band:fis.band||"",
           fis_label:fis.label||"", fis_correct:fis.total||"",
           // SCSS scores
           scss_total:scss?.d1?.CQ||"",

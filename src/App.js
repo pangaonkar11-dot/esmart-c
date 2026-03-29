@@ -1466,18 +1466,31 @@ export default function App() {
           fileNo, uid:"", name:childInfo.examiner||"", dob:"", age:"", gender:"",
           mobile:childInfo.mobile||"", education:"", occupation:"",
           referral:"", assessor:childInfo.examiner||"", notes:"",
-          // Child-specific
+          // Child info
           child_name:childInfo.name||"", child_dob:childInfo.dob||"",
           child_age:childInfo.age||String(Math.round(getAge())),
           child_gender:childInfo.gender||"",
           school:childInfo.school||"", grade:childInfo.grade||"",
           chief_complaint:"",
           // FIS scores
-          fis_iq:fis.iq||"", fis_ma:fis.ma||"", fis_band:fis.band||"",
-          fis_label:fis.label||"", fis_correct:fis.total||"",
+          fis_iq:fis.iq||"", fis_ma:fis.ma||"",
+          fis_band:fis.band||"", fis_label:fis.band||"",
+          fis_percentile:fis.pct||"", fis_correct:fis.total||"",
+          fis_series:fis.ser||"", fis_classif:fis.cls||"",
+          fis_matrix:fis.mat||"", fis_cond:fis.con||"",
           // SCSS scores
-          scss_total:scss?.d1?.CQ||"",
-          scss_profile:scss?.d2?.primaryCluster||"",
+          scss_cq:scss?.d1?.CQ||"",
+          scss_cogStyle:scss?.d1?.primaryStyle||"",
+          scss_eq:scss?.d3?.EQSS||"",
+          scss_eqBand:scss?.d3?.eqBand?.band||"",
+          scss_mhi:scss?.d4?.MHI||"",
+          scss_cri:scss?.d5?.CRI||"",
+          scss_dsmCluster:scss?.d2?.dsmCluster||"",
+          scss_dsmFeatures:scss?.d2?.dsmFeatures||"",
+          scss_shapeCode:(scssSeqs.shapeSeq||[]).join(""),
+          scss_colorCode:(scssSeqs.colorSeq||[]).join(""),
+          scss_shadeCode:(scssSeqs.shadeSeq||[]).join(""),
+          scss_smileyCode:(scssSeqs.smileySeq||[]).join(""),
           scss_validity:"Valid",
         })
       }).catch(()=>{});

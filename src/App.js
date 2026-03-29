@@ -811,12 +811,14 @@ function SeriesSubtest({ onComplete, t }) {
   const [selected, setSelected] = useState(null);
   const [confirmed, setConfirmed] = useState(false);
   const item = SERIES[idx];
+  const { shuffled, newCorrect } = shuffleChoices(item.choices, item.ans, idx, "SER");
 
   const confirm = (choiceIdx) => {
     setSelected(choiceIdx);
     setConfirmed(true);
     setTimeout(() => {
-      const newAns = {...answers, [idx]: choiceIdx};
+      const isCorrect = choiceIdx === newCorrect;
+      const newAns = {...answers, [idx]: isCorrect};
       setAnswers(newAns);
       setSelected(null); setConfirmed(false);
       if (idx + 1 >= SERIES.length) { onComplete(newAns); }
@@ -825,7 +827,7 @@ function SeriesSubtest({ onComplete, t }) {
   };
 
   const skip = () => {
-    const newAns = {...answers, [idx]: -1};
+    const newAns = {...answers, [idx]: false};
     setAnswers(newAns);
     if (idx + 1 >= SERIES.length) { onComplete(newAns); }
     else { setIdx(idx + 1); }
@@ -840,16 +842,14 @@ function SeriesSubtest({ onComplete, t }) {
         </div>
       </div>
       <p style={{fontSize:13,color:"#374151",marginBottom:14,fontWeight:500}}>What comes next in the pattern?</p>
-      {/* Sequence row */}
       <div style={{display:"flex",alignItems:"center",gap:8,justifyContent:"center",marginBottom:20,flexWrap:"wrap"}}>
         {item.seq.map((fig,i) => <FigBox key={i} fig={fig} size={54}/>)}
         <div style={{width:54,height:54,border:"2px dashed #0d9488",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:"#f0fdfa"}}>
           <span style={{fontSize:20,color:"#0d9488",fontWeight:800}}>?</span>
         </div>
       </div>
-      {/* Choices */}
       <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
-        {item.choices.map((fig,i) => (
+        {shuffled.map((fig,i) => (
           <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
             <FigBox fig={fig} size={54} selected={selected===i} onClick={() => !confirmed && confirm(i)}/>
             <span style={{fontSize:12,fontWeight:700,color:selected===i?"#0d5c6e":"#94a3b8"}}>{i+1}</span>
@@ -869,10 +869,13 @@ function ClassifSubtest({ onComplete, t }) {
   const [selected, setSelected] = useState(null);
   const item = CLASSIF[idx];
 
+  const { shuffled: shuffledFigs, newCorrect: newCls } = shuffleChoices(item.figs, item.ans, idx, "CLS");
+
   const confirm = (choiceIdx) => {
     setSelected(choiceIdx);
     setTimeout(() => {
-      const newAns = {...answers, [idx]: choiceIdx};
+      const isCorrect = choiceIdx === newCls;
+      const newAns = {...answers, [idx]: isCorrect};
       setAnswers(newAns);
       setSelected(null);
       if (idx + 1 >= CLASSIF.length) { onComplete(newAns); }
@@ -890,7 +893,7 @@ function ClassifSubtest({ onComplete, t }) {
       </div>
       <p style={{fontSize:13,color:"#374151",marginBottom:14,fontWeight:500}}>Which one is different from the others?</p>
       <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
-        {item.figs.map((fig,i) => (
+        {shuffledFigs.map((fig,i) => (
           <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
             <FigBox fig={fig} size={58} selected={selected===i} onClick={() => selected===null && confirm(i)}/>
             <span style={{fontSize:12,fontWeight:700,color:selected===i?"#7c3aed":"#94a3b8"}}>{i+1}</span>
@@ -938,14 +941,17 @@ function MatrixSubtest({ onComplete, t }) {
         ))}
       </div>
       {/* Choices */}
-      <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
-        {item.choices.map((fig,i) => (
-          <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-            <FigBox fig={fig} size={52} selected={selected===i} onClick={() => selected===null && confirm(i)}/>
-            <span style={{fontSize:12,fontWeight:700,color:selected===i?"#1d4ed8":"#94a3b8"}}>{i+1}</span>
-          </div>
-        ))}
-      </div>
+      {(() => {
+        const { shuffled: matSh, newCorrect: matCor } = shuffleChoices(item.choices, item.ans, idx, "MAT");
+        return <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
+          {matSh.map((fig,i) => (
+            <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+              <FigBox fig={fig} size={52} selected={selected===i} onClick={() => selected===null && (()=>{setSelected(i);setTimeout(()=>{const newAns={...answers,[idx]:i===matCor};setAnswers(newAns);setSelected(null);if(idx+1>=MATRICES.length){onComplete(newAns);}else{setIdx(idx+1);}},500);})()}/>
+              <span style={{fontSize:12,fontWeight:700,color:selected===i?"#1d4ed8":"#94a3b8"}}>{i+1}</span>
+            </div>
+          ))}
+        </div>;
+      })()}
     </div>
   );
 }
@@ -986,28 +992,46 @@ function CondSubtest({ onComplete, t }) {
         <span style={{fontSize:12,color:"#64748b"}}>Choose the one that shows the same dot rule</span>
       </div>
       {/* Choices */}
-      <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
-        {item.choices.map((c,i) => (
-          <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-            <div style={{width:cellSz,height:cellSz,border:`${selected===i?"2.5px solid #0891b2":"1.5px solid #e2e8f0"}`,borderRadius:8,background:selected===i?"#ecfeff":"#fafafa",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",transition:"all 0.15s",boxShadow:selected===i?"0 0 0 3px #a5f3fc":"none"}} onClick={() => selected===null && confirm(i)}>
-              <CondFig shape={c.shape} dot={c.dot} dim={cellSz-6}/>
+      {(() => {
+        const { shuffled: condSh, newCorrect: condCor } = shuffleChoices(item.choices, item.ans, idx, "CON");
+        return <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
+          {condSh.map((c,i) => (
+            <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+              <div style={{width:cellSz,height:cellSz,border:`${selected===i?"2.5px solid #0891b2":"1.5px solid #e2e8f0"}`,borderRadius:8,background:selected===i?"#ecfeff":"#fafafa",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",transition:"all 0.15s",boxShadow:selected===i?"0 0 0 3px #a5f3fc":"none"}} onClick={() => selected===null && (()=>{setSelected(i);setTimeout(()=>{const newAns={...answers,[idx]:i===condCor};setAnswers(newAns);setSelected(null);if(idx+1>=CONDITIONS.length){onComplete(newAns);}else{setIdx(idx+1);}},500);})()}>
+                <CondFig shape={c.shape} dot={c.dot} dim={cellSz-6}/>
+              </div>
+              <span style={{fontSize:12,fontWeight:700,color:selected===i?"#0891b2":"#94a3b8"}}>{i+1}</span>
             </div>
-            <span style={{fontSize:12,fontWeight:700,color:selected===i?"#0891b2":"#94a3b8"}}>{i+1}</span>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>;
+      })()}
     </div>
   );
 }
 
 // Score a subtest's answers against correct answers
-function scoreSubtest(answers, items) {
-  let correct = 0;
-  Object.entries(answers).forEach(([idx, chosen]) => {
-    if (chosen === items[parseInt(idx)].ans) correct++;
-  });
-  return correct;
+
+// ── Deterministic option shuffle — different position per question ───────────
+// Uses question index + subtest name as seed so it is stable across renders
+// The correct answer follows the shuffled position, scoring is recalculated
+function shuffleChoices(choices, correctAns, questionIdx, subtestId) {
+  const seed = (questionIdx + 1) * 31 + subtestId.charCodeAt(0) * 7;
+  const rng = (n) => { const x = Math.sin(seed + n) * 43758; return x - Math.floor(x); };
+  const arr = choices.map((ch, i) => ({ ch, origIdx: i }));
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng(i) * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  const newCorrect = arr.findIndex(a => a.origIdx === correctAns);
+  return { shuffled: arr.map(a => a.ch), newCorrect };
 }
+
+// scoreSubtest now receives {idx: isCorrect} boolean map
+function scoreSubtest(answers, items) {
+  return Object.values(answers).filter(v => v === true).length;
+}
+
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  CLAUDE API — COMBINED NARRATIVE GENERATOR
@@ -1065,18 +1089,98 @@ function CombinedReport({ fisResult, scss, narrative, childInfo, t, onNew }) {
     </div>
   );
 
+  const [reportTab, setReportTab] = useState("clinician"); // "family" | "clinician"
+  const [reportLang, setReportLang] = useState(t); // use passed t by default
+
+  const tabStyle = (active, col) => ({
+    flex:1, padding:"10px", border:"none", borderRadius:8, fontSize:13, fontWeight:700,
+    cursor:"pointer",
+    background: active ? col : "#f1f5f9",
+    color: active ? "white" : "#64748b",
+    transition:"all 0.2s",
+  });
+
   return (
     <div style={{background:"#e8ecf0",minHeight:"100vh",padding:"16px 8px 80px",fontFamily:"'Segoe UI',system-ui,sans-serif"}}>
       <style>{`@media print{body{background:white!important}#no-print{display:none!important}}`}</style>
 
       {/* Action bar */}
-      <div id="no-print" style={{maxWidth:800,margin:"0 auto 14px",display:"flex",gap:9,flexWrap:"wrap"}}>
-        <button onClick={()=>window.print()} style={{flex:1,minWidth:130,padding:"11px",background:"#0d5c6e",color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>{t.printPDF}</button>
-        <button onClick={()=>window.print()} style={{flex:1,minWidth:130,padding:"11px",background:"#16a34a",color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>📊 Print / Save PDF</button>
-        <button onClick={onNew} style={{flex:1,minWidth:130,padding:"11px",background:"white",color:"#0d5c6e",border:"1.5px solid #0d5c6e",borderRadius:9,fontSize:12,fontWeight:600,cursor:"pointer"}}>{t.newAssessment}</button>
-
+      <div id="no-print" style={{maxWidth:800,margin:"0 auto 14px"}}>
+        {/* Tab selector */}
+        <div style={{display:"flex",gap:8,marginBottom:10,background:"white",padding:8,borderRadius:12,boxShadow:"0 2px 8px rgba(0,0,0,0.08)"}}>
+          <button style={tabStyle(reportTab==="family","#0d9488")} onClick={()=>setReportTab("family")}>
+            👨‍👩‍👧 Family Report
+          </button>
+          <button style={tabStyle(reportTab==="clinician","#0d5c6e")} onClick={()=>setReportTab("clinician")}>
+            🏥 Clinician Report
+          </button>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button onClick={()=>window.print()} style={{flex:1,minWidth:130,padding:"10px",background:"#374151",color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>🖨 Print / Save PDF</button>
+          <button onClick={onNew} style={{flex:1,minWidth:130,padding:"10px",background:"white",color:"#0d5c6e",border:"1.5px solid #0d5c6e",borderRadius:9,fontSize:12,fontWeight:600,cursor:"pointer"}}>{t.newAssessment}</button>
+        </div>
       </div>
 
+      {/* ═══ FAMILY REPORT TAB ═══ */}
+      {reportTab==="family" && (
+      <div style={{maxWidth:800,margin:"0 auto",background:"white",boxShadow:"0 4px 40px rgba(0,0,0,0.12)",borderRadius:4,overflow:"hidden"}}>
+        <div style={{background:"linear-gradient(135deg,#0d5c6e,#0d9488)",padding:"20px 24px",color:"white"}}>
+          <div style={{fontSize:9,letterSpacing:"0.18em",textTransform:"uppercase",color:"#9FE1CB",marginBottom:4}}>eSMART-C · Family Report</div>
+          <div style={{fontSize:20,fontWeight:700}}>Assessment Summary for Family</div>
+          <div style={{fontSize:11,color:"rgba(255,255,255,0.7)",marginTop:2}}>CIBS Nagpur · Dr. Shailesh Pangaonkar</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginTop:16}}>
+            {[["Name",childInfo.name||"—"],["Age",`${childInfo.age||"—"} yrs`],["School",childInfo.school||"—"],["Date",today]].map(([l,v])=>(
+              <div key={l} style={{background:"rgba(255,255,255,0.12)",borderRadius:7,padding:"7px 10px"}}>
+                <div style={{fontSize:9,opacity:0.65}}>{l}</div>
+                <div style={{fontSize:12,fontWeight:700}}>{v}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={{padding:"20px"}}>
+          {/* FIS result for family */}
+          <div style={{background:fisResult.bg,border:`2px solid ${fisResult.color}`,borderRadius:12,padding:"16px 20px",marginBottom:16,display:"flex",alignItems:"center",gap:20}}>
+            <div style={{textAlign:"center",minWidth:100}}>
+              <div style={{fontSize:10,color:fisResult.color,fontWeight:700,marginBottom:2}}>Thinking Skills</div>
+              <div style={{fontSize:44,fontWeight:900,color:fisResult.color,lineHeight:1,fontFamily:"monospace"}}>{fisResult.iq}</div>
+              <div style={{fontSize:10,color:fisResult.color}}>IQ · {fisResult.pct}th pct</div>
+            </div>
+            <div style={{flex:1}}>
+              <div style={{fontSize:16,fontWeight:700,color:fisResult.color,marginBottom:6}}>{fisResult.band}</div>
+              <div style={{fontSize:13,color:"#374151",lineHeight:1.7}}>{narrative?.cog_summary}</div>
+            </div>
+          </div>
+          {/* SCSS EQ for family */}
+          <div style={{background:"#fff7ed",border:"2px solid #f97316",borderRadius:12,padding:"16px 20px",marginBottom:16,display:"flex",alignItems:"center",gap:20}}>
+            <div style={{textAlign:"center",minWidth:100}}>
+              <div style={{fontSize:10,color:"#c2410c",fontWeight:700,marginBottom:2}}>Emotional Skills</div>
+              <div style={{fontSize:44,fontWeight:900,color:"#c2410c",lineHeight:1,fontFamily:"monospace"}}>{scss.d3.EQSS}</div>
+              <div style={{fontSize:10,color:"#c2410c"}}>{scss.d3.eqBand.band}</div>
+            </div>
+            <div style={{flex:1}}>
+              <div style={{fontSize:16,fontWeight:700,color:"#c2410c",marginBottom:6}}>Emotional Intelligence Profile</div>
+              <div style={{fontSize:13,color:"#374151",lineHeight:1.7}}>{narrative?.scss_summary}</div>
+            </div>
+          </div>
+          {/* Recommendations for family */}
+          <div style={{background:"#f0fdf4",borderRadius:10,padding:"16px",border:"1px solid #86efac",marginBottom:16}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#15803d",marginBottom:10}}>Recommendations for Family</div>
+            {(narrative?.recommendations||"").split("\n").filter(l=>l.trim()).map((line,i)=>(
+              <div key={i} style={{display:"flex",gap:10,marginBottom:8}}>
+                <span style={{color:"#0d9488",fontWeight:700,flexShrink:0}}>{i+1}.</span>
+                <span style={{fontSize:13,color:"#1f2937",lineHeight:1.7}}>{line.replace(/^\d+\.\s*/,"")}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{fontSize:11,color:"#94a3b8",textAlign:"center",padding:"10px 0",borderTop:"1px solid #f1f5f9"}}>
+            eSMART-C is a screening tool only. All findings require clinical confirmation by a qualified professional.
+          </div>
+        </div>
+      </div>
+      )}
+
+      {/* ═══ CLINICIAN REPORT TAB ═══ */}
+      {reportTab==="clinician" && (
       <div style={{maxWidth:800,margin:"0 auto",background:"white",boxShadow:"0 4px 40px rgba(0,0,0,0.12)"}}>
         {/* Header */}
         <div style={{background:"linear-gradient(135deg,#0d3b47,#0d5c6e,#0d9488)",padding:"20px 24px",color:"white"}}>
@@ -1276,6 +1380,7 @@ function CombinedReport({ fisResult, scss, narrative, childInfo, t, onNew }) {
 
         </div>
       </div>
+      )}
     </div>
   );
 }

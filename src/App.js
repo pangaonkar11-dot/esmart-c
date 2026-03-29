@@ -1072,9 +1072,9 @@ function CombinedReport({ fisResult, scss, narrative, childInfo, t, onNew }) {
       {/* Action bar */}
       <div id="no-print" style={{maxWidth:800,margin:"0 auto 14px",display:"flex",gap:9,flexWrap:"wrap"}}>
         <button onClick={()=>window.print()} style={{flex:1,minWidth:130,padding:"11px",background:"#0d5c6e",color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>{t.printPDF}</button>
-        <button onClick={()=>{ makeCSV_C(childInfo,fisResult,scss,lang); }} style={{flex:1,minWidth:130,padding:"11px",background:"#16a34a",color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>📊 Download CSV</button>
+        <button onClick={()=>window.print()} style={{flex:1,minWidth:130,padding:"11px",background:"#16a34a",color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>📊 Print / Save PDF</button>
         <button onClick={onNew} style={{flex:1,minWidth:130,padding:"11px",background:"white",color:"#0d5c6e",border:"1.5px solid #0d5c6e",borderRadius:9,fontSize:12,fontWeight:600,cursor:"pointer"}}>{t.newAssessment}</button>
-        {dbSubmitted_C&&<div style={{flex:2,padding:"10px 14px",borderRadius:9,background:"#f0fdf4",border:"1px solid #86efac",fontSize:12,fontWeight:700,color:"#15803d"}}>✅ Data submitted to CIBS Databank (File: {childInfo?.fileNo})</div>}
+
       </div>
 
       <div style={{maxWidth:800,margin:"0 auto",background:"white",boxShadow:"0 4px 40px rgba(0,0,0,0.12)"}}>

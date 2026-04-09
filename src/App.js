@@ -1117,6 +1117,16 @@ function CombinedReport({ fisResult, scss, narrative, childInfo, t, onNew }) {
         </div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           <button onClick={()=>window.print()} style={{flex:1,minWidth:130,padding:"10px",background:"#374151",color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>🖨 Print / Save PDF</button>
+          {childInfo?.fileNo && (
+            <a href={`https://esmart-report.vercel.app?reg=${childInfo.fileNo}&mode=family&lang=${lang||"en"}`}
+              target="_blank" rel="noopener noreferrer"
+              style={{flex:1,minWidth:130,padding:"10px",background:"linear-gradient(135deg,#0d9488,#10b981)",
+                color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,
+                cursor:"pointer",textDecoration:"none",textAlign:"center",display:"flex",
+                alignItems:"center",justifyContent:"center",gap:4}}>
+              📋 {t.forParent||"Family Report"} →
+            </a>
+          )}
           <button onClick={onNew} style={{flex:1,minWidth:130,padding:"10px",background:"white",color:"#0d5c6e",border:"1.5px solid #0d5c6e",borderRadius:9,fontSize:12,fontWeight:600,cursor:"pointer"}}>{t.newAssessment}</button>
         </div>
       </div>

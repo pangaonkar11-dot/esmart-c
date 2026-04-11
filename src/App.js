@@ -1,1542 +1,1206 @@
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
 
 // ── GOOGLE SHEETS DATA PIPELINE ───────────────────────────────────────────────
 const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxYw3DNfteGUApE97zpPScPgVCrHjNXTU-kuwabwQNviLmsaW4gSEd6hqY1FoTJsxu4HQ/exec";
+
+// ── Stable Auto-ID ────────────────────────────────────────────────────────
+function generateAutoID(surname, dob, mobile1, mobile2) {
+  const sur  = (surname||"").toUpperCase().replace(/[^A-Z]/g,"").slice(0,3)||"XXX";
+  const dobC = (dob||"").replace(/[^0-9]/g,"");
+  const ddmm = dobC.length>=4 ? dobC.slice(0,4) : "0000";
+  const mob  = ((mobile1||mobile2||"").replace(/[^0-9]/g,"").slice(-4))||"0000";
+  const yr   = String(new Date().getFullYear()).slice(-2);
+  return `CIBS-${yr}-${sur}-${ddmm}-${mob}`;
+}
 const getURLParam = (key) => { try { return new URLSearchParams(window.location.search).get(key)||""; } catch { return ""; } };
 const autoFileNo  = () => { const yy=String(new Date().getFullYear()).slice(-2); return `CIBS-${yy}-${String(Math.floor(Math.random()*9000)+1000)}`; };
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  eSMART-C  |  CIBS Integrated Child Assessment Platform
-//  Part 1 : CIBS-FIS  (Fluid Intelligence Scale — original items, Cattell norms)
-//  Part 2 : SCSS      (Shape-Colour-Shade-Smiley Test — Dr Pangaonkar, CIBS)
-//  © 2026  Central Institute of Behavioural Sciences, Nagpur
-// ══════════════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
+// AGE GROUP DETECTION
+// Groups: pre=<6, pri=6–10, sec=11–15, hig=16–18
+// Priority: DOB field > Age (years) field
+// ════════════════════════════════════════════════════════════════
+function detectAgeGroup(ci) {
+  let ageYears = null;
 
-// ── TRANSLATIONS ──────────────────────────────────────────────────────────────
+  if (ci.dob) {
+    const dob  = new Date(ci.dob);
+    const today = new Date();
+    const ms   = today - dob;
+    if (!isNaN(ms) && ms > 0) {
+      ageYears = ms / (1000 * 60 * 60 * 24 * 365.25);
+    }
+  }
+
+  if (ageYears === null && ci.age) {
+    const parsed = parseFloat(ci.age);
+    if (!isNaN(parsed) && parsed > 0) ageYears = parsed;
+  }
+
+  if (ageYears === null)   return { group: "pri", label: "Primary (6–10 yrs)", age: null };
+  if (ageYears < 6)        return { group: "pre", label: "Pre-school (< 6 yrs)",        age: ageYears };
+  if (ageYears <= 10)      return { group: "pri", label: "Primary (6–10 yrs)",           age: ageYears };
+  if (ageYears <= 15)      return { group: "sec", label: "Secondary (11–15 yrs)",        age: ageYears };
+  if (ageYears <= 18)      return { group: "hig", label: "Higher Secondary (16–18 yrs)", age: ageYears };
+  return                          { group: "hig", label: "Higher Secondary (16–18 yrs)", age: ageYears };
+}
+
+const GROUP_BADGE = {
+  pre: { bg:"#fef9c3", color:"#854d0e", border:"#fde047", icon:"🧸" },
+  pri: { bg:"#eff6ff", color:"#1d4ed8", border:"#bfdbfe", icon:"✏️" },
+  sec: { bg:"#f0fdf4", color:"#15803d", border:"#86efac", icon:"📚" },
+  hig: { bg:"#faf5ff", color:"#7c3aed", border:"#d8b4fe", icon:"🎓" },
+};
+
+// ════════════════════════════════════════════════════════════════
+// TRANSLATIONS
+// ════════════════════════════════════════════════════════════════
 const T = {
-  en:{
-    appTitle:"eSMART-C", subtitle:"Child Cognitive & Personality Assessment",
-    org:"Central Institute of Behavioural Sciences, Nagpur",
-    choose:"Choose Language / भाषा चुनें / भाषा निवडा",
-    whoFills:"Who is administering this assessment?",
-    clinician:"Clinician / Teacher / Researcher", parent:"Parent / Caregiver",
-    clinSub:"I am a trained health professional, teacher, or researcher",
-    parSub:"I am the parent or primary caregiver of this child",
-    childInfo:"Child Information",
-    childName:"Child's Full Name", dob:"Date of Birth", age:"Age (years)",
-    gender:"Gender", gM:"Male", gF:"Female", gO:"Other",
-    school:"School / Institution", grade:"Class / Grade",
-    fileNo:"CIBS File No.", examiner:"Examiner",
-    next:"Next →", back:"← Back", proceed:"Proceed →",
-    disclaimer:"Important Notice",
-    discPoints:[
-      "eSMART-C is a SCREENING TOOL that measures cognitive ability and personality traits. It is NOT a diagnostic instrument.",
-      "Part 1 (CIBS-FIS) measures fluid intelligence using original visual reasoning tasks, calibrated to Cattell's Culture Fair Intelligence Test norms (1949, 1973). Results give a Mental Age (MA) and an estimated IQ using Binet's MA÷CA×100 formula.",
-      "Part 2 (SCSS — Shape Colour Shade Smiley Test) is an original projective personality instrument developed by Dr. Shailesh Pangaonkar, CIBS Nagpur. It provides cognitive style, personality, emotional, health, and risk profiles.",
-      "All scores are screening indicators only. Clinical decisions must be based on a full assessment by a qualified professional.",
-      "This tool acknowledges the theoretical framework of Raymond B. Cattell (1949) and the normative standards published in academic literature.",
-    ],
-    agreeText:"I have read and understood the above. I wish to proceed.",
-    proceedBtn:"Proceed to Assessment →",
-    part1Name:"Part 1 — CIBS Fluid Intelligence Scale (CIBS-FIS)",
-    part2Name:"Part 2 — Shape Colour Shade Smiley Test (SCSS)",
-    p1Intro:"This is a visual reasoning test. You will see patterns, pictures and puzzles. Look carefully and choose the best answer from the choices given. There are no trick questions — just look at the pictures carefully.",
-    p1Note:"There are 4 short tests. Each test has a time limit. Answer as many as you can.",
-    subtests:[
-      {id:"SER",name:"Patterns",  desc:"What comes next in the pattern?",      items:12, mins:3},
-      {id:"CLS",name:"Odd One Out",desc:"Which one is different?",              items:14, mins:4},
-      {id:"MAT",name:"Grids",     desc:"Which picture completes the grid?",     items:12, mins:3},
-      {id:"CON",name:"Positions", desc:"Which picture matches the rule?",       items:8,  mins:2.5},
-    ],
-    practiceTitle:"Practice — let's try one",
-    practiceInstr:"Look at the pictures in the top row. What should come next? Click your answer below.",
-    startTest:"Start Test →",
-    timeLeft:"Time left",
-    skip:"Skip →",
-    answered:"answered",
-    p2Intro:"In this part, you will choose pictures one by one — starting with the one you like most. There are no right or wrong answers. Just choose honestly.",
-    p2stages:["Shapes","Colours","Shades","Feelings"],
-    generating:"Generating Assessment Report…",
-    genSteps:["Computing intelligence scores…","Analysing personality profile…","Building emotional indicators…","Calculating risk indicators…","Writing clinical report…"],
-    reportTitle:"eSMART-C Assessment Report",
-    forParent:"Summary for Family",
-    forClinician:"Clinician Report",
-    cogSection:"Part 1 — Cognitive Assessment (CIBS-FIS)",
-    perSection:"Part 2 — Personality & Emotional Profile (SCSS)",
-    printPDF:"🖨️ Print / PDF",
-    newAssessment:"🔄 New Assessment",
-    disclaimer2:"Screening tool only. All findings require clinical confirmation. Not a substitute for professional assessment.",
+  en: {
+    appTitle:"eSMART-P", appSubtitle:"Parent / Caregiver Screening Questionnaire",
+    appOrg:"Central Institute of Behavioural Sciences, Nagpur",
+    steps:["Child Info","Perinatal History","Behaviour","Report"],
+    childInfo:"Child / Subject Information",
+    childName:"Child's Full Name", childAge:"Age (years)", childGender:"Gender",
+    dob:"Date of Birth (optional)",
+    fileNo:"CIBS File No.", regNo:"Registration No.", school:"School / Institution",
+    examiner:"Examiner / Clinician", dateAssessment:"Date of Assessment",
+    informantDetails:"Informant Details",
+    informantName:"Informant Name", relation:"Relationship to Child",
+    genderM:"Male", genderF:"Female", genderO:"Other",
+    relMother:"Mother", relFather:"Father", relGrand:"Grandparent",
+    relGuard:"Guardian", relTeacher:"Teacher", relOther:"Other Caregiver",
+    selectDots:"Select...",
+    instChild:"Instructions: This questionnaire is to be filled by the parent or primary caregiver. Please answer based on your observations over the past 6 months. Responses are used only for clinical screening and remain confidential.",
+    nextPerinatal:"Next: Perinatal History →", back:"← Back",
+    nextBehaviour:"Next: Behaviour →", generateReport:"Generate Report →",
+    submittedDB:"✅ Submitted to CIBS Databank",
+    instPerinatal:"Recollect the birth period of your child and mark YES, NO, or DON'T KNOW. You may seek help of your spouse, paediatrician, or records for accuracy.",
+    yes:"YES", no:"NO", dontKnow:"DON'T KNOW", answered:"answered",
+    ageGroupDetected:"Age group detected",
+    ageGroupNote:"Questions have been automatically selected for this age group.",
+    ageGroupManual:"Age not entered — using Primary (6–10) by default. Enter age or date of birth for accurate questions.",
+    instBehaviour:"Read each statement carefully. Choose the option that best describes your child's behaviour over the past 6 months.",
+    notTrue:"Not True", rarelyTrue:"Rarely True", sometimesTrue:"Sometimes True",
+    mostlyTrue:"Mostly True", absolutelyTrue:"Absolutely True",
+    reportTitle:"eSMART-P Assessment Report", forParent:"Summary for Parents", forClinician:"Clinician Report",
+    domainChart:"Domain Score Chart — Clinician View",
+    normalMedian:"Normal Median", atRiskLine:"At-Risk Threshold", probableLine:"Probable Threshold",
+    probableDSM:"Probable DSM-5 / ICD-11 Categories",
+    perinatalRisk:"Perinatal Risk Profile", futureRisk:"Future Risk Indicators",
+    screenerNote:"Screening tool only. All flags require clinical confirmation.",
+    suicideFlag:"SUICIDE / SELF-HARM RISK FLAG TRIGGERED",
+    suicideFlagDesc:"Pattern: ADHD (Mild+) + MDD (Moderate+, ≥4) + ODD or CD (Moderate/Severe). Indicates elevated impulsivity, emotional pain, and interpersonal conflict. Immediate safety assessment mandatory.",
+    openMini:"▼ Open Safety Assessment Mini-Module", closeMini:"▲ Close",
+    miniNote:"For trained clinicians / counsellors only. Use calm, normalising tone.",
+    severeImmediate:"Any positive response = SEVERE / IMMEDIATE RISK. Specialist referral within 24–48 hours mandatory.",
+    exportSave:"Export & Save", printPDF:"🖨️ Print / Save PDF", downloadCSV:"📊 Download CSV",
+    sendSheets:"Send to Google Sheets (CIBS Research Database)",
+    sheetsPlaceholder:"Paste Google Apps Script URL here", send:"Send",
+    newAssessment:"🔄 New Assessment", editResponses:"← Edit Responses",
+    disclaimer:"Safety Disclaimer: eSMART-P is a screening tool, not a diagnostic instrument. Risk flags require clinical interview and family consultation. Suicidal ideation must be separately assessed. CIBS Nagpur — Dr. Shailesh Pangaonkar, Director and Consultant Psychiatrist.",
+    severity:{ Normal:"Normal", Mild:"Mild", Moderate:"Moderate", Severe:"Severe" },
+    riskActions:{
+      0:"No clinical concern identified. Reassure family. Re-screen after 6 months if concerns persist.",
+      1:"Strengthen home & school supports. Psychoeducation for parents. Re-screen after 3–6 months.",
+      2:"Refer to school psychologist / paediatrician for detailed evaluation within 4–6 weeks.",
+      3:"Urgent child mental health professional assessment within 1–2 weeks. Safety evaluation mandatory.",
+    },
+    parentSummary:{
+      0:"No significant concerns were identified at this time. Continue to support healthy development and re-screen if concerns arise.",
+      1:"One area of mild concern was identified. Strengthen support at home and school; re-check in 3–6 months.",
+      2:"Areas of concern were identified. A specialist evaluation is recommended within 4–6 weeks.",
+      3:"Multiple significant concerns were identified. Urgent evaluation by a child mental health professional within 1–2 weeks is strongly recommended. Please do not delay.",
+    },
   },
-  hi:{
-    appTitle:"eSMART-C", subtitle:"बाल संज्ञानात्मक एवं व्यक्तित्व मूल्यांकन",
-    org:"केंद्रीय व्यावहारिक विज्ञान संस्थान, नागपुर",
-    choose:"भाषा चुनें",
-    whoFills:"यह मूल्यांकन कौन कर रहा है?",
-    clinician:"चिकित्सक / शिक्षक / शोधकर्ता", parent:"माता-पिता / देखभालकर्ता",
-    clinSub:"मैं एक प्रशिक्षित स्वास्थ्य पेशेवर, शिक्षक या शोधकर्ता हूँ",
-    parSub:"मैं इस बच्चे का माता-पिता या प्राथमिक देखभालकर्ता हूँ",
+  hi: {
+    appTitle:"eSMART-P", appSubtitle:"माता-पिता / देखभालकर्ता जांच प्रश्नावली",
+    appOrg:"केंद्रीय व्यावहारिक विज्ञान संस्थान, नागपुर",
+    steps:["बच्चे की जानकारी","जन्म इतिहास","व्यवहार","रिपोर्ट"],
     childInfo:"बच्चे की जानकारी",
-    childName:"बच्चे का पूरा नाम", dob:"जन्म तिथि", age:"आयु (वर्ष)",
-    gender:"लिंग", gM:"पुरुष", gF:"महिला", gO:"अन्य",
-    school:"विद्यालय / संस्था", grade:"कक्षा",
-    fileNo:"CIBS फाइल नंबर", examiner:"परीक्षक",
-    next:"आगे →", back:"← वापस", proceed:"जारी रखें →",
-    disclaimer:"महत्वपूर्ण सूचना",
-    discPoints:[
-      "eSMART-C एक जांच उपकरण है जो संज्ञानात्मक क्षमता और व्यक्तित्व को मापता है। यह निदान उपकरण नहीं है।",
-      "भाग 1 (CIBS-FIS) कैटल के CFIT मानकों पर आधारित मानसिक आयु और IQ का अनुमान देता है।",
-      "भाग 2 (SCSS) डॉ. शैलेश पानगावकर, CIBS नागपुर द्वारा विकसित एक प्रक्षेपण परीक्षण है।",
-      "सभी स्कोर केवल जांच संकेतक हैं। नैदानिक निर्णय योग्य पेशेवर द्वारा लिए जाने चाहिए।",
-    ],
-    agreeText:"मैंने उपरोक्त पढ़ और समझ लिया है। मैं आगे बढ़ना चाहता/चाहती हूँ।",
-    proceedBtn:"मूल्यांकन की ओर आगे बढ़ें →",
-    part1Name:"भाग 1 — CIBS तरल बुद्धि स्केल (CIBS-FIS)",
-    part2Name:"भाग 2 — आकार रंग छाया मुस्कान परीक्षण (SCSS)",
-    p1Intro:"यह एक चित्र-आधारित तर्क परीक्षण है। तस्वीरों और पैटर्न को ध्यान से देखें और सही उत्तर चुनें।",
-    p1Note:"4 छोटे परीक्षण हैं। प्रत्येक की समय-सीमा है।",
-    subtests:[
-      {id:"SER",name:"पैटर्न",    desc:"अगला क्या आएगा?",         items:12, mins:3},
-      {id:"CLS",name:"अलग चुनो", desc:"कौन सा अलग है?",           items:14, mins:4},
-      {id:"MAT",name:"ग्रिड",    desc:"कौन सा चित्र ग्रिड पूरा करता है?", items:12, mins:3},
-      {id:"CON",name:"स्थितियाँ",desc:"कौन सा चित्र नियम से मेल खाता है?",items:8, mins:2.5},
-    ],
-    practiceTitle:"अभ्यास — एक बार कोशिश करें",
-    practiceInstr:"ऊपर की पंक्ति में चित्र देखें। आगे क्या आना चाहिए? नीचे से अपना उत्तर चुनें।",
-    startTest:"परीक्षण शुरू करें →",
-    timeLeft:"शेष समय",
-    skip:"छोड़ें →",
-    answered:"उत्तर दिए",
-    p2Intro:"इस भाग में आप एक-एक करके चित्र चुनेंगे — पहले जो सबसे ज्यादा पसंद हो। कोई सही या गलत उत्तर नहीं है।",
-    p2stages:["आकृतियाँ","रंग","छाया","भावनाएं"],
-    generating:"मूल्यांकन रिपोर्ट तैयार हो रही है…",
-    genSteps:["बुद्धि स्कोर की गणना…","व्यक्तित्व प्रोफाइल विश्लेषण…","भावनात्मक संकेतक…","जोखिम संकेतक…","नैदानिक रिपोर्ट…"],
-    reportTitle:"eSMART-C मूल्यांकन रिपोर्ट",
-    forParent:"परिवार के लिए सारांश",
-    forClinician:"चिकित्सक रिपोर्ट",
-    cogSection:"भाग 1 — संज्ञानात्मक मूल्यांकन (CIBS-FIS)",
-    perSection:"भाग 2 — व्यक्तित्व एवं भावनात्मक प्रोफाइल (SCSS)",
-    printPDF:"🖨️ प्रिंट / PDF",
-    newAssessment:"🔄 नया मूल्यांकन",
-    disclaimer2:"केवल जांच उपकरण। सभी निष्कर्षों के लिए नैदानिक पुष्टि आवश्यक है।",
+    childName:"बच्चे का पूरा नाम", childAge:"आयु (वर्ष)", childGender:"लिंग",
+    dob:"जन्म तिथि (वैकल्पिक)",
+    fileNo:"CIBS फाइल नंबर", regNo:"पंजीकरण नंबर", school:"विद्यालय / संस्था",
+    examiner:"परीक्षक / चिकित्सक", dateAssessment:"मूल्यांकन की तिथि",
+    informantDetails:"सूचनादाता की जानकारी",
+    informantName:"सूचनादाता का नाम", relation:"बच्चे से संबंध",
+    genderM:"पुरुष", genderF:"स्त्री", genderO:"अन्य",
+    relMother:"माँ", relFather:"पिता", relGrand:"दादा/दादी/नाना/नानी",
+    relGuard:"अभिभावक", relTeacher:"शिक्षक", relOther:"अन्य देखभालकर्ता",
+    selectDots:"चुनें...",
+    instChild:"निर्देश: यह प्रश्नावली माता-पिता या प्राथमिक देखभालकर्ता द्वारा भरी जानी है। पिछले 6 महीनों की अपनी टिप्पणियों के आधार पर उत्तर दें।",
+    nextPerinatal:"आगे: जन्म इतिहास →", back:"← वापस",
+    nextBehaviour:"आगे: व्यवहार →", generateReport:"रिपोर्ट बनाएं →",
+    submittedDB:"✅ CIBS डेटाबैंक में जमा किया",
+    instPerinatal:"अपने बच्चे के जन्म काल को याद करें और हाँ, नहीं या पता नहीं चिह्नित करें।",
+    yes:"हाँ", no:"नहीं", dontKnow:"पता नहीं", answered:"उत्तर दिए",
+    ageGroupDetected:"पहचाना गया आयु समूह",
+    ageGroupNote:"इस आयु समूह के लिए प्रश्न स्वतः चुने गए हैं।",
+    ageGroupManual:"आयु दर्ज नहीं — प्राथमिक (6–10) उपयोग किया जा रहा है। सटीक प्रश्नों के लिए आयु या जन्म तिथि दर्ज करें।",
+    instBehaviour:"प्रत्येक कथन ध्यान से पढ़ें। वह विकल्प चुनें जो पिछले 6 महीनों में आपके बच्चे के व्यवहार का सबसे अच्छा वर्णन करता है।",
+    notTrue:"सच नहीं", rarelyTrue:"शायद ही", sometimesTrue:"कभी-कभी",
+    mostlyTrue:"अक्सर सच", absolutelyTrue:"बिल्कुल सच",
+    reportTitle:"eSMART-P मूल्यांकन रिपोर्ट", forParent:"माता-पिता के लिए सारांश", forClinician:"चिकित्सक रिपोर्ट",
+    domainChart:"डोमेन स्कोर चार्ट — चिकित्सक दृश्य",
+    normalMedian:"सामान्य माध्यिका", atRiskLine:"जोखिम सीमा", probableLine:"संभावित सीमा",
+    probableDSM:"संभावित DSM-5 / ICD-11 वर्गीकरण",
+    perinatalRisk:"जन्म जोखिम प्रोफाइल", futureRisk:"भविष्य के जोखिम संकेतक",
+    screenerNote:"केवल जांच उपकरण। सभी संकेतों के लिए नैदानिक पुष्टि आवश्यक।",
+    suicideFlag:"आत्मघात / स्वयं-हानि जोखिम चेतावनी",
+    suicideFlagDesc:"पैटर्न: ADHD (हल्का+) + MDD (मध्यम+, ≥4) + ODD या CD (मध्यम/गंभीर)। तत्काल सुरक्षा मूल्यांकन अनिवार्य।",
+    openMini:"▼ सुरक्षा मूल्यांकन मॉड्यूल खोलें", closeMini:"▲ बंद करें",
+    miniNote:"केवल प्रशिक्षित चिकित्सकों के लिए।",
+    severeImmediate:"कोई भी सकारात्मक उत्तर = तत्काल जोखिम। 24-48 घंटे में विशेषज्ञ को रेफर करें।",
+    exportSave:"निर्यात और सहेजें", printPDF:"🖨️ प्रिंट / PDF सहेजें", downloadCSV:"📊 CSV डाउनलोड करें",
+    sendSheets:"Google Sheets को भेजें",
+    sheetsPlaceholder:"Google Apps Script URL यहाँ डालें", send:"भेजें",
+    newAssessment:"🔄 नया मूल्यांकन", editResponses:"← उत्तर संपादित करें",
+    disclaimer:"सुरक्षा अस्वीकरण: eSMART-P एक जांच उपकरण है, निदान नहीं। CIBS नागपुर — डॉ. शैलेश पानगावकर।",
+    severity:{ Normal:"सामान्य", Mild:"हल्का", Moderate:"मध्यम", Severe:"गंभीर" },
+    riskActions:{ 0:"कोई नैदानिक चिंता नहीं। परिवार को आश्वस्त करें। 6 महीने बाद पुनः जांच।", 1:"घर और विद्यालय में सहायता मजबूत करें। 3–6 महीने में पुनः जांच।", 2:"4–6 सप्ताह में विशेषज्ञ मूल्यांकन।", 3:"1–2 सप्ताह में तत्काल बाल मानसिक स्वास्थ्य मूल्यांकन।" },
+    parentSummary:{ 0:"इस समय कोई महत्वपूर्ण चिंता नहीं मिली।", 1:"हल्की चिंता का एक क्षेत्र मिला। घर और विद्यालय में सहायता बढ़ाएं।", 2:"चिंता के क्षेत्र मिले। 4–6 सप्ताह में विशेषज्ञ से मिलें।", 3:"कई महत्वपूर्ण चिंताएं मिलीं। 1–2 सप्ताह में बाल मनोचिकित्सक से मिलना अनिवार्य।" },
   },
-  mr:{
-    appTitle:"eSMART-C", subtitle:"बालक संज्ञानात्मक व व्यक्तिमत्व मूल्यांकन",
-    org:"केंद्रीय वर्तणूक विज्ञान संस्था, नागपूर",
-    choose:"भाषा निवडा",
-    whoFills:"हे मूल्यांकन कोण करत आहे?",
-    clinician:"वैद्य / शिक्षक / संशोधक", parent:"पालक / काळजीवाहू",
-    clinSub:"मी एक प्रशिक्षित आरोग्य व्यावसायिक, शिक्षक किंवा संशोधक आहे",
-    parSub:"मी या मुलाचा पालक किंवा प्राथमिक काळजीवाहू आहे",
+  mr: {
+    appTitle:"eSMART-P", appSubtitle:"पालक / काळजीवाहू तपासणी प्रश्नावली",
+    appOrg:"केंद्रीय वर्तणूक विज्ञान संस्था, नागपूर",
+    steps:["मुलाची माहिती","जन्म इतिहास","वर्तन","अहवाल"],
     childInfo:"मुलाची माहिती",
-    childName:"मुलाचे पूर्ण नाव", dob:"जन्मतारीख", age:"वय (वर्षे)",
-    gender:"लिंग", gM:"पुरुष", gF:"स्त्री", gO:"इतर",
-    school:"शाळा / संस्था", grade:"इयत्ता",
-    fileNo:"CIBS फाईल क्र.", examiner:"परीक्षक",
-    next:"पुढे →", back:"← मागे", proceed:"पुढे जा →",
-    disclaimer:"महत्त्वाची सूचना",
-    discPoints:[
-      "eSMART-C हे एक तपासणी साधन आहे जे संज्ञानात्मक क्षमता आणि व्यक्तिमत्व मोजते. हे निदान साधन नाही.",
-      "भाग 1 (CIBS-FIS) Cattell च्या CFIT मानदंडांवर आधारित मानसिक वय आणि IQ अंदाज देते.",
-      "भाग 2 (SCSS) डॉ. शैलेश पानगावकर, CIBS नागपूर यांनी विकसित केलेले प्रक्षेपण परीक्षण आहे.",
-      "सर्व स्कोर केवळ तपासणी निर्देशक आहेत. वैद्यकीय निर्णय पात्र व्यावसायिकाद्वारे घेतले जावेत.",
-    ],
-    agreeText:"मी वरील वाचले आणि समजले आहे. मला पुढे जायचे आहे.",
-    proceedBtn:"मूल्यांकनाकडे पुढे जा →",
-    part1Name:"भाग 1 — CIBS तरल बुद्धिमत्ता स्केल (CIBS-FIS)",
-    part2Name:"भाग 2 — आकार रंग छाया हास्य परीक्षण (SCSS)",
-    p1Intro:"हे एक चित्र-आधारित तर्क परीक्षण आहे. चित्रे आणि नमुने काळजीपूर्वक पाहा आणि योग्य उत्तर निवडा.",
-    p1Note:"4 छोटी परीक्षणे आहेत. प्रत्येकाची वेळ मर्यादा आहे.",
-    subtests:[
-      {id:"SER",name:"नमुने",    desc:"पुढे काय येईल?",                items:12, mins:3},
-      {id:"CLS",name:"वेगळे काढा",desc:"कोणते वेगळे आहे?",            items:14, mins:4},
-      {id:"MAT",name:"जाळी",     desc:"जाळी पूर्ण करणारे चित्र कोणते?",items:12, mins:3},
-      {id:"CON",name:"स्थाने",   desc:"नियमाशी जुळणारे चित्र कोणते?",  items:8,  mins:2.5},
-    ],
-    practiceTitle:"सराव — एकदा प्रयत्न करा",
-    practiceInstr:"वरच्या रांगेतील चित्रे पाहा. पुढे काय यायला हवे? खालून तुमचे उत्तर निवडा.",
-    startTest:"परीक्षण सुरू करा →",
-    timeLeft:"उरलेला वेळ",
-    skip:"सोडा →",
-    answered:"उत्तरे दिली",
-    p2Intro:"या भागात आपण एक-एक करून चित्रे निवडाल — आधी जे सर्वात आवडते ते. बरोबर किंवा चुकीचे उत्तर नाही.",
-    p2stages:["आकार","रंग","छाया","भावना"],
-    generating:"मूल्यांकन अहवाल तयार होत आहे…",
-    genSteps:["बुद्धिमत्ता स्कोर गणना…","व्यक्तिमत्व प्रोफाइल विश्लेषण…","भावनिक निर्देशक…","जोखीम निर्देशक…","वैद्यकीय अहवाल…"],
-    reportTitle:"eSMART-C मूल्यांकन अहवाल",
-    forParent:"कुटुंबासाठी सारांश",
-    forClinician:"वैद्यकीय अहवाल",
-    cogSection:"भाग 1 — संज्ञानात्मक मूल्यांकन (CIBS-FIS)",
-    perSection:"भाग 2 — व्यक्तिमत्व व भावनिक प्रोफाइल (SCSS)",
-    printPDF:"🖨️ प्रिंट / PDF",
-    newAssessment:"🔄 नवीन मूल्यांकन",
-    disclaimer2:"केवळ तपासणी साधन. सर्व निष्कर्षांसाठी वैद्यकीय पुष्टी आवश्यक.",
+    childName:"मुलाचे पूर्ण नाव", childAge:"वय (वर्षे)", childGender:"लिंग",
+    dob:"जन्मतारीख (पर्यायी)",
+    fileNo:"CIBS फाईल क्र.", regNo:"नोंदणी क्र.", school:"शाळा / संस्था",
+    examiner:"परीक्षक / वैद्य", dateAssessment:"मूल्यांकनाची तारीख",
+    informantDetails:"माहिती देणाऱ्याची माहिती",
+    informantName:"माहिती देणाऱ्याचे नाव", relation:"मुलाशी संबंध",
+    genderM:"पुरुष", genderF:"स्त्री", genderO:"इतर",
+    relMother:"आई", relFather:"वडील", relGrand:"आजी / आजोबा",
+    relGuard:"पालक", relTeacher:"शिक्षक", relOther:"इतर काळजीवाहू",
+    selectDots:"निवडा...",
+    instChild:"सूचना: ही प्रश्नावली पालक किंवा प्राथमिक काळजीवाहूने भरायची आहे. गेल्या 6 महिन्यांच्या निरीक्षणांवर आधारित उत्तरे द्या.",
+    nextPerinatal:"पुढे: जन्म इतिहास →", back:"← मागे",
+    nextBehaviour:"पुढे: वर्तन →", generateReport:"अहवाल तयार करा →",
+    submittedDB:"✅ CIBS डेटाबँकमध्ये सबमिट केले",
+    instPerinatal:"आपल्या मुलाच्या जन्म काळाची आठवण करा आणि होय, नाही किंवा माहीत नाही असे चिन्हांकित करा.",
+    yes:"होय", no:"नाही", dontKnow:"माहीत नाही", answered:"उत्तरे दिली",
+    ageGroupDetected:"वय गट ओळखला",
+    ageGroupNote:"या वय गटासाठी प्रश्न आपोआप निवडले गेले आहेत.",
+    ageGroupManual:"वय दिलेले नाही — प्राथमिक (6–10) वापरत आहे. अचूक प्रश्नांसाठी वय किंवा जन्मतारीख द्या.",
+    instBehaviour:"प्रत्येक विधान काळजीपूर्वक वाचा. गेल्या 6 महिन्यांत आपल्या मुलाच्या वर्तनाचे सर्वोत्तम वर्णन करणारा पर्याय निवडा.",
+    notTrue:"खरे नाही", rarelyTrue:"क्वचितच", sometimesTrue:"कधी-कधी",
+    mostlyTrue:"बहुतेक खरे", absolutelyTrue:"पूर्णपणे खरे",
+    reportTitle:"eSMART-P मूल्यांकन अहवाल", forParent:"पालकांसाठी सारांश", forClinician:"वैद्यकीय अहवाल",
+    domainChart:"डोमेन गुण आलेख — वैद्यकीय दृश्य",
+    normalMedian:"सामान्य मध्यक", atRiskLine:"जोखीम उंबरठा", probableLine:"संभाव्य उंबरठा",
+    probableDSM:"संभाव्य DSM-5 / ICD-11 वर्गीकरण",
+    perinatalRisk:"जन्म जोखीम प्रोफाइल", futureRisk:"भविष्यातील जोखीम निर्देशक",
+    screenerNote:"केवळ तपासणी साधन. सर्व संकेतांसाठी वैद्यकीय पुष्टी आवश्यक.",
+    suicideFlag:"आत्मघात / स्वयं-हानी जोखीम सूचना",
+    suicideFlagDesc:"नमुना: ADHD (सौम्य+) + MDD (मध्यम+, ≥4) + ODD किंवा CD (मध्यम/तीव्र). तत्काळ सुरक्षा मूल्यांकन अनिवार्य.",
+    openMini:"▼ सुरक्षा मूल्यांकन मॉड्यूल उघडा", closeMini:"▲ बंद करा",
+    miniNote:"केवळ प्रशिक्षित वैद्यांसाठी.",
+    severeImmediate:"कोणताही सकारात्मक प्रतिसाद = तत्काळ जोखीम. 24–48 तासांत तज्ज्ञाकडे पाठवणे अनिवार्य.",
+    exportSave:"निर्यात आणि जतन करा", printPDF:"🖨️ प्रिंट / PDF जतन करा", downloadCSV:"📊 CSV डाउनलोड करा",
+    sendSheets:"Google Sheets ला पाठवा",
+    sheetsPlaceholder:"Google Apps Script URL येथे टाका", send:"पाठवा",
+    newAssessment:"🔄 नवीन मूल्यांकन", editResponses:"← उत्तरे संपादित करा",
+    disclaimer:"सुरक्षा अस्वीकरण: eSMART-P हे तपासणी साधन आहे, निदान नाही. CIBS नागपूर — डॉ. शैलेश पानगावकर.",
+    severity:{ Normal:"सामान्य", Mild:"सौम्य", Moderate:"मध्यम", Severe:"तीव्र" },
+    riskActions:{ 0:"कोणतीही वैद्यकीय चिंता नाही. कुटुंबाला आश्वस्त करा. 6 महिन्यांनंतर पुन्हा तपासणी.", 1:"घर आणि शाळेत सहाय्य मजबूत करा. 3–6 महिन्यांत पुन्हा तपासणी.", 2:"4–6 आठवड्यांत तज्ज्ञ मूल्यांकन.", 3:"1–2 आठवड्यांत तातडीने बालमानसिक आरोग्य मूल्यांकन." },
+    parentSummary:{ 0:"सध्या कोणतीही महत्त्वाची चिंता आढळली नाही.", 1:"सौम्य चिंतेचे एक क्षेत्र आढळले. घर आणि शाळेत सहाय्य वाढवा.", 2:"चिंतेची क्षेत्रे आढळली. 4–6 आठवड्यांत तज्ज्ञांशी भेट घ्या.", 3:"अनेक महत्त्वाच्या चिंता आढळल्या. 1–2 आठवड्यांत बालमनोचिकित्सकाशी भेट अनिवार्य." },
   },
 };
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  CIBS-FIS NORMS  (Cattell 1973, academic literature — freely citable)
-//  Raw score → Mental Age lookup, Scale 2 (ages 8-14, max 46 items)
-//  SD = 24, Mean = 100. IQ = (MA ÷ CA) × 100 (Binet formula, public domain)
-// ══════════════════════════════════════════════════════════════════════════════
-const S2_NORMS = {
-  M:{8:18,8.5:20,9:22,9.5:24,10:26,10.5:27,11:29,11.5:30,12:32,12.5:33,13:35,13.5:36,14:37},
-  F:{8:19,8.5:21,9:22,9.5:24,10:26,10.5:28,11:29,11.5:31,12:32,12.5:33,13:34,13.5:35,14:36},
-};
-// Scale 1 norms (ages 4-8, max 30 items)
-const S1_NORMS = {
-  M:{4:8,4.5:10,5:12,5.5:14,6:16,6.5:18,7:20,7.5:22,8:24},
-  F:{4:9,4.5:11,5:13,5.5:15,6:17,6.5:18,7:20,7.5:22,8:24},
-};
-// Scale 3 norms (ages 14+, max 50 items)
-const S3_NORMS = {
-  M:{14:29,14.5:31,15:33,15.5:35,16:36,16.5:37,17:38,18:38},
-  F:{14:28,14.5:30,15:32,15.5:34,16:35,16.5:36,17:37,18:37},
+// ════════════════════════════════════════════════════════════════
+// PERINATAL ITEMS (common across all age groups)
+// ════════════════════════════════════════════════════════════════
+const PERINATAL = [
+  { id:1,  en:"Difficult Pregnancy / Complications during Pregnancy",                      hi:"गर्भावस्था में तकलीफें / उपचार की आवश्यकता",                     mr:"गर्भावस्थेत समस्या / उपचारांची आवश्यकता" },
+  { id:2,  en:"Born much before expected date / Preterm birth",                             hi:"प्रसूति अपेक्षित तारीख से पहले हुई",                              mr:"अपेक्षित तारखेपूर्वी जन्म / अकाली जन्म" },
+  { id:3,  en:"Birth process complicated / Difficult Delivery",                             hi:"प्रसूति के दौरान जटिलताएं / कठिन प्रसव",                          mr:"प्रसूतीदरम्यान गुंतागुंत / कठीण प्रसव" },
+  { id:4,  en:"Twins or more pregnancies",                                                  hi:"जुड़वा या अधिक शिशुओं का एक साथ जन्म",                            mr:"जुळे किंवा अधिक बाळांचा एकत्र जन्म" },
+  { id:5,  en:"Assisted delivery / Foetal distress / Meconium passed",                      hi:"सीजर / फोटल डिस्ट्रेस / मिकोनियम",                                mr:"सिझेरियन / गर्भस्थ शिशू संकट / मेकोनियम" },
+  { id:6,  en:"Did not cry for some time after birth / Breathing difficulty",               hi:"जन्म के बाद काफी देर तक नहीं रोया / सांस की परेशानी",            mr:"जन्मानंतर बराच वेळ रडले नाही / श्वासाचा त्रास" },
+  { id:7,  en:"Baby hospitalised for more than 7 days in ICU",                             hi:"शिशु को ७ दिन से अधिक ICU में रखा गया",                            mr:"बाळाला ७ दिवसांपेक्षा जास्त ICU मध्ये दाखल" },
+  { id:8,  en:"Needed ventilator / artificial breathing support",                           hi:"वेंटिलेटर / कृत्रिम सांसों की आवश्यकता",                          mr:"व्हेंटिलेटर / कृत्रिम श्वासाची गरज" },
+  { id:9,  en:"Had convulsions, lung infections or other medical problems",                 hi:"मिर्गी, फेफड़ों का संक्रमण या अन्य बीमारियां",                     mr:"झटके, फुफ्फुसांचा संसर्ग किंवा इतर आरोग्य समस्या" },
+  { id:10, en:"Delayed social smile, speech or social connectivity",                        hi:"मुस्कान, बोलना, सामाजिक जुड़ाव में देरी",                          mr:"हास्य, बोलणे, सामाजिक जोडणीस उशीर" },
+  { id:11, en:"Delayed neck holding, crawling, or walking",                                 hi:"गर्दन संभालना, रेंगना, चलना — सब देर से",                         mr:"मान उचलणे, रांगणे, चालणे — सर्व उशिरा" },
+  { id:12, en:"Not toilet trained / Late toilet control",                                   hi:"पेशाब-शौच पर नियंत्रण देर से आया",                                mr:"लघवी-शौचावर नियंत्रण उशिरा" },
+  { id:13, en:"Has visual, speech, or movement problems",                                   hi:"दृष्टि, बोली या शारीरिक दमखम की कमी",                             mr:"दृष्टी, बोलणे किंवा शारीरिक क्षमतेची कमतरता" },
+  { id:14, en:"Since birth — long-term medication or recurrent hospitalisation",            hi:"जन्म से ही लंबे समय तक दवाइयाँ या बार-बार अस्पताल",              mr:"जन्मापासून दीर्घकालीन औषधे किंवा वारंवार रुग्णालयात" },
+];
+
+// ════════════════════════════════════════════════════════════════
+// AGE-STRATIFIED BEHAVIOURAL ITEMS
+// Same 26 item IDs and domain mapping across all groups.
+// Only question TEXT changes — scoring algorithm is identical.
+// ════════════════════════════════════════════════════════════════
+const BXITEMS = {
+
+  // ── PRE-SCHOOL  < 6 years ──────────────────────────────────
+  pre: [
+    { id:"CI2",  domain:"IDD",  seq:1,
+      en:"Learns new skills (sorting shapes, matching pictures, pretend play) much more slowly than other children the same age",
+      hi:"हमउम्र बच्चों की तुलना में नई चीजें (आकृतियाँ मिलाना, तस्वीरें पहचानना, खेलना) सीखने में बहुत धीमा है",
+      mr:"समवयस्क मुलांपेक्षा नवीन कौशल्ये (आकार जुळवणे, चित्रे ओळखणे, खेळणे) शिकण्यात खूप मंद आहे" },
+    { id:"CI3",  domain:"IDD",  seq:2,
+      en:"Needs an adult to guide and repeat step-by-step before mastering simple tasks like using a spoon, drinking from a cup, or putting on shoes",
+      hi:"खाना खाने, कप से पीने या जूते पहनने जैसे सरल कामों के लिए बार-बार बड़े की मदद और मार्गदर्शन की जरूरत पड़ती है",
+      mr:"जेवण करणे, कप मधून पिणे किंवा बूट घालणे यासारख्या साध्या कामांसाठी वारंवार मोठ्यांच्या मार्गदर्शनाची गरज आहे" },
+    { id:"SI6",  domain:"IDD",  seq:3,
+      en:"Does not reliably follow simple 2-step instructions like 'pick up the ball and give it to me'",
+      hi:"'गेंद उठाओ और मुझे दो' जैसे सरल 2-चरणीय निर्देशों को ठीक से नहीं समझ पाता",
+      mr:"'बॉल उचल आणि मला दे' यासारख्या साध्या 2-पायऱ्यांच्या सूचना नीट समजत नाहीत" },
+    { id:"SI7",  domain:"IDD",  seq:4,
+      en:"Uses far fewer words, sounds, or gestures to communicate than other children the same age",
+      hi:"हमउम्र बच्चों की तुलना में बातचीत के लिए बहुत कम शब्दों, ध्वनियों या इशारों का उपयोग करता है",
+      mr:"समवयस्क मुलांपेक्षा बोलण्यासाठी खूप कमी शब्द, आवाज किंवा हावभाव वापरतो/वापरते" },
+    { id:"ADD27",domain:"ADHD", seq:5,
+      en:"Cannot sit still even during a favourite short activity, song, or story for more than 2–3 minutes",
+      hi:"पसंदीदा छोटी गतिविधि, गाने या कहानी के दौरान भी 2–3 मिनट से ज्यादा शांत नहीं बैठ सकता",
+      mr:"आवडती छोटी क्रिया, गाणे किंवा गोष्ट असतानाही 2–3 मिनिटांपेक्षा जास्त शांत बसू शकत नाही" },
+    { id:"ADD29",domain:"ADHD", seq:6,
+      en:"Moves from one toy or activity to another without completing any",
+      hi:"एक खिलौने या गतिविधि से दूसरे की तरफ जाता है, कोई भी पूरी नहीं करता",
+      mr:"एका खेळणीवरून दुसऱ्याकडे जातो/जाते, कोणतेही पूर्ण करत नाही" },
+    { id:"ASD14",domain:"ASD",  seq:7,
+      en:"Does not make eye contact with familiar people — parents, siblings, or regular caregivers",
+      hi:"माता-पिता, भाई-बहन या रोज देखभाल करने वालों से भी आँखें नहीं मिलाता",
+      mr:"आई-बाबा, भावंडे किंवा नेहमीचे काळजीवाहू यांच्याशीही नजर मिळवत नाही" },
+    { id:"SLD34",domain:"SLD",  seq:8,
+      en:"Has difficulty with simple spatial tasks: putting shapes in correct holes, building a tower of blocks in order, following 'put it on top'",
+      hi:"सरल स्थानिक कामों में परेशानी: सही छेद में आकृति डालना, क्रम से ब्लॉक लगाना, 'ऊपर रखो' जैसे निर्देश समझना",
+      mr:"साध्या स्थानिक कामांत अडचण: योग्य छिद्रात आकार घालणे, क्रमाने ब्लॉक रचणे, 'वर ठेव' यासारख्या सूचना समजणे" },
+    { id:"MDD44",domain:"MDD",  seq:9,
+      en:"Appears persistently sad, cries easily, or has noticeably lost interest and joy in play and favourite activities",
+      hi:"लगातार उदास रहता है, जल्दी रोता है, या खेलने और पसंदीदा गतिविधियों में रुचि और खुशी खो दी है",
+      mr:"सतत दुखी दिसतो/दिसते, सहज रडतो/रडते, किंवा खेळणे आणि आवडत्या क्रियांमध्ये रस आणि आनंद गमावला आहे" },
+    { id:"ANX49",domain:"ANX",  seq:10,
+      en:"Becomes very distressed when separated from caregiver — cries intensely, refuses to stay with others, or clings excessively",
+      hi:"देखभालकर्ता से अलग होने पर बहुत परेशान हो जाता है — जोर से रोता है, दूसरों के साथ रहने से मना करता है, या बहुत चिपका रहता है",
+      mr:"काळजीवाहूपासून वेगळे केल्यावर खूप अस्वस्थ होतो/होते — जोरात रडतो/रडते, इतरांसोबत राहण्यास नकार देतो/देते" },
+    { id:"PI10", domain:"IDD",  seq:11,
+      en:"Still needs full adult help with eating, dressing, and toilet — well beyond what is expected for their age",
+      hi:"खाना, कपड़े पहनना और शौचालय के लिए अभी भी पूरी बड़े की मदद चाहिए — उम्र के हिसाब से बहुत ज्यादा",
+      mr:"खाणे, कपडे घालणे आणि शौचालयासाठी अजूनही पूर्ण मोठ्यांची मदत लागते — वयाच्या मानाने खूपच जास्त" },
+    { id:"PI11", domain:"IDD",  seq:12,
+      en:"Shows behaviour that frequently upsets, harms, or deeply disturbs other children or adults around them",
+      hi:"अक्सर ऐसा व्यवहार करता है जो आसपास के बच्चों या बड़ों को परेशान करता है, नुकसान पहुंचाता है या बहुत परेशान करता है",
+      mr:"अनेकदा असे वर्तन करतो/करते जे आजूबाजूच्या मुलांना किंवा मोठ्यांना त्रास देते, दुखवते किंवा खूप अस्वस्थ करते" },
+    { id:"ASD18",domain:"ASD",  seq:13,
+      en:"Repeatedly flaps hands, rocks body, spins in circles, or lines up objects in a fixed pattern",
+      hi:"बार-बार हाथ हिलाता है, शरीर झुकाता है, गोल-गोल घूमता है, या चीजों को एक निश्चित तरीके से लाइन में रखता है",
+      mr:"वारंवार हात हलवतो/हलवते, शरीर हलवतो/हलवते, गोल फिरतो/फिरते, किंवा वस्तू एका विशिष्ट पद्धतीने रांगेत ठेवतो/ठेवते" },
+    { id:"ADD31",domain:"ADHD", seq:14,
+      en:"Constantly loses or misplaces toys, clothing, cups, or other personal belongings",
+      hi:"खिलौने, कपड़े, कप या अन्य सामान लगातार खो देता या गलत जगह रख देता है",
+      mr:"खेळणी, कपडे, कप किंवा इतर वस्तू सतत हरवतो/हरवते किंवा चुकीच्या ठिकाणी ठेवतो/ठेवते" },
+    { id:"SLD37",domain:"SLD",  seq:15,
+      en:"Cannot recall simple sequences such as nursery rhyme words, counting 1–5, or morning routine steps in order",
+      hi:"नर्सरी राइम के शब्द, 1–5 तक गिनती, या सुबह की दिनचर्या के चरणों को क्रम से याद नहीं कर पाता",
+      mr:"नर्सरी राइमचे शब्द, 1–5 मोजणे, किंवा सकाळच्या नित्यक्रमाच्या पायऱ्या क्रमाने आठवत नाहीत" },
+    { id:"MDD46",domain:"MDD",  seq:16,
+      en:"Has lost the ability to smile, show happiness, or enjoy play — appears flat, withdrawn, or disinterested for weeks at a time",
+      hi:"हँसने, खुशी दिखाने या खेलने का आनंद लेने की क्षमता खो दी है — हफ्तों तक उदास, दूरी बनाने वाला, या उदासीन दिखता है",
+      mr:"हसणे, आनंद दाखवणे किंवा खेळण्याचा आनंद घेण्याची क्षमता गमावली आहे — आठवडे उदास, दूर किंवा अनासक्त दिसतो/दिसते" },
+    { id:"ANX60",domain:"ANX",  seq:17,
+      en:"Clings to caregiver or shows intense fear of ordinary things (dark, strangers, dogs, loud sounds) beyond what is typical for their age",
+      hi:"देखभालकर्ता से चिपका रहता है या उम्र के हिसाब से असाधारण डर दिखाता है (अंधेरा, अजनबी, कुत्ते, तेज आवाजें)",
+      mr:"काळजीवाहूला घट्ट धरतो/धरते किंवा वयाच्या मानाने असाधारण भीती दाखवतो/दाखवते (अंधार, अनोळखी, कुत्रे, मोठे आवाज)" },
+    { id:"PI12", domain:"IDD",  seq:18,
+      en:"Must be watched every moment — unsafe without constant adult supervision due to poor judgment about danger",
+      hi:"हर पल नजर रखनी पड़ती है — खतरे की समझ कम होने के कारण बड़े की लगातार निगरानी के बिना असुरक्षित है",
+      mr:"दर क्षणी नजर ठेवावी लागते — धोक्याची समज कमी असल्यामुळे सतत मोठ्यांच्या देखरेखीशिवाय असुरक्षित आहे" },
+    { id:"ASD21",domain:"ASD",  seq:19,
+      en:"Becomes very distressed when routine changes — insists on the same sequence for meals, bath, bedtime, or travel route",
+      hi:"दिनचर्या बदलने पर बहुत परेशान हो जाता है — खाने, नहाने, सोने या यात्रा के रास्ते का एक ही क्रम चाहता है",
+      mr:"नित्यक्रम बदलल्यावर खूप अस्वस्थ होतो/होते — जेवण, आंघोळ, झोपणे किंवा प्रवासाच्या मार्गाचा एकच क्रम हवा असतो" },
+    { id:"ADD33",domain:"ADHD", seq:20,
+      en:"Cannot slow down or stop moving even at bedtime — constantly running, climbing, or touching everything",
+      hi:"सोने के समय भी नहीं रुक पाता — लगातार दौड़ता, चढ़ता, या हर चीज छूता रहता है",
+      mr:"झोपण्याच्या वेळीही थांबू शकत नाही — सतत धावतो/धावते, चढतो/चढते किंवा सर्व काही हात लावतो/लावते" },
+    { id:"ASD25",domain:"ASD",  seq:21,
+      en:"Has not reached learning milestones expected for age — not yet pointing, doing pretend play, or learning colours and shapes",
+      hi:"उम्र के अनुसार अपेक्षित सीखने के पड़ाव नहीं पहुंचे — इशारा नहीं करता, नाटक नहीं खेलता, या रंग और आकृतियाँ नहीं सीख पाया",
+      mr:"वयानुसार अपेक्षित शिकण्याचे टप्पे गाठलेले नाहीत — अजून बोट दाखवत नाही, नाटक खेळत नाही, किंवा रंग व आकार शिकलेले नाही" },
+    { id:"SLD41",domain:"SLD",  seq:22,
+      en:"Has difficulty with age-expected fine motor tasks — holding a crayon, turning pages, threading beads, or using child scissors",
+      hi:"उम्र के अनुसार अपेक्षित बारीक मोटर कामों में परेशानी — क्रेयॉन पकड़ना, पन्ने पलटना, मोती पिरोना, या बच्चों की कैंची चलाना",
+      mr:"वयानुसार अपेक्षित बारीक मोटर कामांत अडचण — क्रेयॉन धरणे, पाने उलटणे, मणी ओवणे, किंवा मुलांची कात्री वापरणे" },
+    { id:"ANX62",domain:"ANX",  seq:23,
+      en:"Has repeated stomach aches, headaches, or body complaints without medical cause — especially before new situations, school, or separation",
+      hi:"नई स्थितियों, स्कूल या अलगाव से पहले खासतौर पर बार-बार पेट दर्द, सिरदर्द, या शरीर की शिकायतें बिना किसी चिकित्सीय कारण के",
+      mr:"नवीन परिस्थिती, शाळा किंवा वेगळे केल्यापूर्वी विशेषतः वारंवार पोटदुखी, डोकेदुखी किंवा कोणत्याही वैद्यकीय कारणाशिवाय शरीराच्या तक्रारी" },
+    { id:"ODD51",domain:"ODD",  seq:24,
+      en:"Has intense, prolonged tantrums and persistently refuses or defies caregiver instructions beyond what is typical for age",
+      hi:"वयोचित से परे तीव्र, लंबे नखरे और लगातार देखभालकर्ता के निर्देशों का मना करना या विरोध करना",
+      mr:"वयाच्या मानाने अत्यंत तीव्र, दीर्घ हट्ट आणि सतत काळजीवाहूंच्या सूचना नाकारणे किंवा विरोध करणे" },
+    { id:"CD53", domain:"CD",   seq:25,
+      en:"Deliberately hurts other children or animals, destroys property, or takes others' belongings without remorse",
+      hi:"जानबूझकर अन्य बच्चों या जानवरों को चोट पहुंचाता है, संपत्ति नष्ट करता है, या दूसरों का सामान बिना पछतावे के ले लेता है",
+      mr:"जाणूनबुजून इतर मुलांना किंवा प्राण्यांना दुखवतो/दुखवते, मालमत्ता नष्ट करतो/करते, किंवा पश्चात्तापाशिवाय इतरांच्या वस्तू घेतो/घेते" },
+    { id:"CD55", domain:"CD",   seq:26,
+      en:"Shows deliberate aggression toward others — hits, bites, kicks, or intimidates — without apparent reason",
+      hi:"दूसरों पर जानबूझकर आक्रामकता दिखाता है — बिना किसी स्पष्ट कारण के मारता, काटता, लात मारता या धमकाता है",
+      mr:"इतरांवर जाणूनबुजून आक्रमकता दाखवतो/दाखवते — कोणत्याही स्पष्ट कारणाशिवाय मारतो/मारते, चावतो/चावते, लाथ मारतो/मारते" },
+  ],
+
+  // ── PRIMARY  6–10 years ────────────────────────────────────
+  pri: [
+    { id:"CI2",  domain:"IDD",  seq:1,
+      en:"Lags behind classmates in learning across all school subjects",
+      hi:"कक्षा में हर विषय में हमउम्र बच्चों से पिछड़ा है",
+      mr:"वर्गातील सर्व विषयांत समवयस्कांपेक्षा मागे आहे" },
+    { id:"CI3",  domain:"IDD",  seq:2,
+      en:"Needs extra support and more time to learn new things compared to classmates",
+      hi:"नई चीज सीखने में हमजमात बच्चों की तुलना में ज्यादा समय और सहारे की जरूरत",
+      mr:"नवीन गोष्टी शिकण्यासाठी वर्गमित्रांच्या तुलनेत अतिरिक्त वेळ आणि आधार हवा" },
+    { id:"SI6",  domain:"IDD",  seq:3,
+      en:"Has difficulty understanding what others mean, feel, or expect in conversations",
+      hi:"बातचीत में दूसरों का मतलब, भावना या अपेक्षाएं समझने में परेशानी",
+      mr:"संभाषणात इतरांचा अर्थ, भावना किंवा अपेक्षा समजण्यात अडचण" },
+    { id:"SI7",  domain:"IDD",  seq:4,
+      en:"Communicates and interacts noticeably differently from children of the same age",
+      hi:"हमउम्र बच्चों की तुलना में स्पष्ट रूप से अलग तरह से बातचीत और मेलजोल करता है",
+      mr:"त्याच वयाच्या मुलांपेक्षा स्पष्टपणे वेगळ्या पद्धतीने संवाद आणि संपर्क करतो/करते" },
+    { id:"ADD27",domain:"ADHD", seq:5,
+      en:"Has difficulty keeping attention on tasks, homework, or classroom activities",
+      hi:"काम, होमवर्क या कक्षा की गतिविधियों पर ध्यान बनाए रखने में कठिनाई",
+      mr:"काम, गृहपाठ किंवा वर्गातील क्रियांवर लक्ष केंद्रित ठेवण्यात अडचण" },
+    { id:"ADD29",domain:"ADHD", seq:6,
+      en:"Cannot finish schoolwork, homework, or chores once started",
+      hi:"शुरू करने के बाद स्कूल का काम, होमवर्क या घर का काम पूरा नहीं कर पाता",
+      mr:"एकदा सुरू केल्यावर शाळेचे काम, गृहपाठ किंवा घरकाम पूर्ण करू शकत नाही" },
+    { id:"ASD14",domain:"ASD",  seq:7,
+      en:"Has poor eye contact with people during conversation or play",
+      hi:"बातचीत या खेल के दौरान लोगों से ठीक से आँखें नहीं मिलाता",
+      mr:"संभाषण किंवा खेळादरम्यान लोकांशी नीट नजर मिळवत नाही" },
+    { id:"SLD34",domain:"SLD",  seq:8,
+      en:"Has difficulty finding his or her place when reading, or locating belongings or positions",
+      hi:"पढ़ते समय अपनी जगह खोजने में परेशानी, या अपना सामान या स्थान ढूंढने में दिक्कत",
+      mr:"वाचताना स्वतःची जागा शोधण्यात अडचण, किंवा सामान किंवा स्थान शोधण्यात अडचण" },
+    { id:"MDD44",domain:"MDD",  seq:9,
+      en:"Often appears sad or unhappy over a prolonged period — not just occasional bad days",
+      hi:"लंबे समय तक अक्सर उदास या दुखी दिखता है — सिर्फ कभी-कभी बुरे दिन नहीं",
+      mr:"दीर्घ कालावधीत बऱ्याचदा उदास किंवा दुखी दिसतो/दिसते — फक्त अधून मधून वाईट दिवस नाही" },
+    { id:"ANX49",domain:"ANX",  seq:10,
+      en:"Worries a lot about bad things that might happen — to self, family, or at school",
+      hi:"खुद, परिवार, या स्कूल में होने वाली बुरी चीजों की बहुत चिंता करता है",
+      mr:"स्वतःला, कुटुंबाला किंवा शाळेत होणाऱ्या वाईट गोष्टींची खूप काळजी करतो/करते" },
+    { id:"PI10", domain:"IDD",  seq:11,
+      en:"Needs extra adult help with eating, dressing, toilet use, and hygiene beyond what is normal for age",
+      hi:"खाने, कपड़े पहनने, शौचालय और साफ-सफाई में उम्र के हिसाब से ज्यादा बड़े की मदद चाहिए",
+      mr:"जेवण, कपडे, शौचालय आणि स्वच्छता यासाठी वयाच्या मानाने जास्त मोठ्यांची मदत लागते" },
+    { id:"PI11", domain:"IDD",  seq:12,
+      en:"Shows behaviour that causes problems, conflict, or embarrassment in social settings",
+      hi:"ऐसा व्यवहार करता है जो सामाजिक परिस्थितियों में समस्या, विवाद या शर्मिंदगी पैदा करता है",
+      mr:"सामाजिक परिस्थितीत समस्या, संघर्ष किंवा लाज निर्माण करणारे वर्तन करतो/करते" },
+    { id:"ASD18",domain:"ASD",  seq:13,
+      en:"Flaps hands, rocks body, or spins in circles repeatedly in ways that attract attention",
+      hi:"बार-बार हाथ हिलाता है, शरीर झुकाता है, या गोल-गोल घूमता है जिससे ध्यान जाता है",
+      mr:"वारंवार हात हलवतो/हलवते, शरीर हलवतो/हलवते, किंवा गोल फिरतो/फिरते ज्यामुळे लोकांचे लक्ष जाते" },
+    { id:"ADD31",domain:"ADHD", seq:14,
+      en:"Frequently loses belongings, stationery, books, or personal items",
+      hi:"अपना सामान, स्टेशनरी, किताबें, या व्यक्तिगत चीजें बार-बार खो देता है",
+      mr:"सामान, स्टेशनरी, पुस्तके किंवा वैयक्तिक वस्तू वारंवार हरवतो/हरवते" },
+    { id:"SLD37",domain:"SLD",  seq:15,
+      en:"Cannot remember sequences of words, or has difficulty with reading, spelling, or word-based maths",
+      hi:"शब्दों के क्रम याद नहीं रख पाता, या पढ़ने, लिखने की वर्तनी, या शाब्दिक गणित में परेशानी",
+      mr:"शब्दांचा क्रम लक्षात ठेवू शकत नाही, किंवा वाचणे, स्पेलिंग, किंवा शब्द-आधारित गणितात अडचण" },
+    { id:"MDD46",domain:"MDD",  seq:16,
+      en:"Often appears down, hopeless, or has lost enjoyment in activities they previously liked",
+      hi:"अक्सर निराश, हताश दिखता है, या पहले पसंद की गतिविधियों में आनंद खो दिया है",
+      mr:"बऱ्याचदा निराश, हताश दिसतो/दिसते, किंवा आधी आवडत्या क्रियांमध्ये आनंद गमावला आहे" },
+    { id:"ANX60",domain:"ANX",  seq:17,
+      en:"Lives with a constant feeling that something bad is about to happen — hard to reassure",
+      hi:"हमेशा यह भावना रहती है कि कुछ बुरा होने वाला है — आश्वस्त करना मुश्किल है",
+      mr:"नेहमी काहीतरी वाईट होणार अशी भावना असते — आश्वस्त करणे कठीण असते" },
+    { id:"PI12", domain:"IDD",  seq:18,
+      en:"Needs constant supervision and reminders to complete daily tasks safely and appropriately",
+      hi:"रोजमर्रा के कामों को सुरक्षित और सही तरीके से पूरा करने के लिए लगातार निगरानी और याद दिलाने की जरूरत",
+      mr:"दैनंदिन कामे सुरक्षितपणे आणि योग्यरित्या पूर्ण करण्यासाठी सतत देखरेख आणि आठवण करून देण्याची गरज" },
+    { id:"ASD21",domain:"ASD",  seq:19,
+      en:"Must follow fixed routines at home and school — becomes very upset when disrupted",
+      hi:"घर और स्कूल में एक निश्चित दिनचर्या का पालन करना जरूरी है — बाधित होने पर बहुत परेशान हो जाता है",
+      mr:"घरी आणि शाळेत ठराविक नित्यक्रम पाळणे आवश्यक — विस्कळीत झाल्यावर खूप अस्वस्थ होतो/होते" },
+    { id:"ADD33",domain:"ADHD", seq:20,
+      en:"Always full of energy but without focus or direction — cannot stop even when asked",
+      hi:"हमेशा ऊर्जा से भरा लेकिन बिना ध्यान या दिशा के — कहने पर भी नहीं रुकता",
+      mr:"नेहमी उत्साहाने भरलेला/भरलेली पण दिशा किंवा लक्ष नाही — सांगितले तरी थांबत नाही" },
+    { id:"ASD25",domain:"ASD",  seq:21,
+      en:"Shows delayed learning or thinking skills compared to same-age classmates",
+      hi:"हमउम्र सहपाठियों की तुलना में सीखने या सोचने की क्षमता देर से विकसित हुई है",
+      mr:"त्याच वयाच्या वर्गमित्रांच्या तुलनेत शिकण्याची किंवा विचार करण्याची क्षमता उशिरा विकसित झाली आहे" },
+    { id:"SLD41",domain:"SLD",  seq:22,
+      en:"Has poor motor control or difficulty with hand-eye coordination — messy writing, poor drawing",
+      hi:"मोटर नियंत्रण कम है या हाथ-आँख के तालमेल में परेशानी — गंदी लिखावट, खराब चित्रकारी",
+      mr:"मोटर नियंत्रण कमी किंवा हात-डोळा समन्वयात अडचण — अव्यवस्थित लेखन, खराब चित्रकला" },
+    { id:"ANX62",domain:"ANX",  seq:23,
+      en:"Has stomach upsets, breathlessness, restlessness, or irritability linked to worry or school",
+      hi:"चिंता या स्कूल से जुड़े पेट दर्द, सांस फूलना, बेचैनी, या चिड़चिड़ापन",
+      mr:"काळजी किंवा शाळेशी संबंधित पोटदुखी, श्वास लागणे, अस्वस्थपणा किंवा चिडचिडेपणा" },
+    { id:"ODD51",domain:"ODD",  seq:24,
+      en:"Frequently argues with or talks back to parents, teachers, and other adults",
+      hi:"माता-पिता, शिक्षकों और अन्य बड़ों के साथ बार-बार बहस करता है या उलटा जवाब देता है",
+      mr:"पालक, शिक्षक आणि इतर वडीलधाऱ्यांशी वारंवार वाद घालतो/घालते किंवा उलट उत्तर देतो/देते" },
+    { id:"CD53", domain:"CD",   seq:25,
+      en:"Repeatedly does things that are clearly not permitted — steals, lies, bullies, or damages property",
+      hi:"बार-बार साफ मना की हुई चीजें करता है — चोरी, झूठ, धमकाना, या संपत्ति नुकसान पहुंचाना",
+      mr:"वारंवार स्पष्टपणे परवानगी नसलेल्या गोष्टी करतो/करते — चोरी, खोटे बोलणे, दादागिरी, किंवा मालमत्तेचे नुकसान" },
+    { id:"CD55", domain:"CD",   seq:26,
+      en:"Is rude, disrespectful, physically aggressive, or threatening with people around",
+      hi:"आसपास के लोगों के साथ असभ्य, अनादरजनक, शारीरिक रूप से आक्रामक, या धमकी देने वाला है",
+      mr:"आजूबाजूच्या लोकांशी असभ्य, अनादरकारक, शारीरिकदृष्ट्या आक्रमक किंवा धमकी देणारा/देणारी आहे" },
+  ],
+
+  // ── SECONDARY  11–15 years ─────────────────────────────────
+  sec: [
+    { id:"CI2",  domain:"IDD",  seq:1,
+      en:"Falls noticeably behind peers in academic learning and general reasoning",
+      hi:"शैक्षणिक शिक्षण और सामान्य तर्क में साथियों से स्पष्ट रूप से पीछे है",
+      mr:"शैक्षणिक शिकणे आणि सामान्य तर्कात समवयस्कांपेक्षा स्पष्टपणे मागे आहे" },
+    { id:"CI3",  domain:"IDD",  seq:2,
+      en:"Needs significant adult support and much more time to grasp new academic concepts",
+      hi:"नई शैक्षणिक अवधारणाओं को समझने के लिए काफी बड़े की मदद और बहुत ज्यादा समय चाहिए",
+      mr:"नवीन शैक्षणिक संकल्पना समजण्यासाठी लक्षणीय मोठ्यांचा आधार आणि खूप जास्त वेळ लागतो" },
+    { id:"SI6",  domain:"IDD",  seq:3,
+      en:"Struggles to understand implied meanings, sarcasm, social cues, or what others are thinking",
+      hi:"निहित अर्थ, व्यंग्य, सामाजिक संकेत, या दूसरे क्या सोच रहे हैं यह समझने में कठिनाई",
+      mr:"अव्यक्त अर्थ, उपहास, सामाजिक संकेत किंवा इतर काय विचार करत आहेत हे समजण्यात अडचण" },
+    { id:"SI7",  domain:"IDD",  seq:4,
+      en:"Communicates and interacts in ways that are noticeably different from peers at school and social settings",
+      hi:"स्कूल और सामाजिक परिस्थितियों में साथियों से स्पष्ट रूप से अलग तरह से बातचीत और मेलजोल करता है",
+      mr:"शाळेत आणि सामाजिक परिस्थितीत समवयस्कांपेक्षा स्पष्टपणे वेगळ्या पद्धतीने संवाद करतो/करते" },
+    { id:"ADD27",domain:"ADHD", seq:5,
+      en:"Has difficulty sustaining attention on schoolwork, projects, or extended conversations",
+      hi:"स्कूल के काम, प्रोजेक्ट, या लंबी बातचीत पर ध्यान बनाए रखने में कठिनाई",
+      mr:"शाळेचे काम, प्रकल्प किंवा दीर्घ संभाषणावर लक्ष टिकवण्यात अडचण" },
+    { id:"ADD29",domain:"ADHD", seq:6,
+      en:"Cannot complete assignments, projects, or chores once started — frequent incomplete work",
+      hi:"शुरू करने के बाद असाइनमेंट, प्रोजेक्ट, या काम पूरा नहीं कर पाता — काम अक्सर अधूरा रहता है",
+      mr:"एकदा सुरू केल्यावर असाइनमेंट, प्रकल्प किंवा काम पूर्ण करू शकत नाही — काम वारंवार अपूर्ण राहते" },
+    { id:"ASD14",domain:"ASD",  seq:7,
+      en:"Has poor or inconsistent eye contact in social situations and conversations",
+      hi:"सामाजिक स्थितियों और बातचीत में आँख का संपर्क कम या असंगत है",
+      mr:"सामाजिक परिस्थिती आणि संभाषणात नजरेचा संपर्क कमी किंवा असंगत आहे" },
+    { id:"SLD34",domain:"SLD",  seq:8,
+      en:"Has a poor sense of direction, loses place in text or notes, or gets disoriented in familiar settings",
+      hi:"दिशा की समझ कम है, पाठ या नोट्स में जगह खो देता है, या परिचित जगहों में भी खो जाता है",
+      mr:"दिशेची समज कमी आहे, मजकूर किंवा नोट्समध्ये जागा हरवते, किंवा परिचित ठिकाणीही दिशाभूल होते" },
+    { id:"MDD44",domain:"MDD",  seq:9,
+      en:"Often appears sad, unhappy, or tearful without a clear reason for prolonged periods",
+      hi:"बिना किसी स्पष्ट कारण के लंबे समय तक अक्सर उदास, दुखी, या रोने वाला दिखता है",
+      mr:"कोणत्याही स्पष्ट कारणाशिवाय दीर्घ काळ बऱ्याचदा उदास, दुखी किंवा रडवेला/रडवेली दिसतो/दिसते" },
+    { id:"ANX49",domain:"ANX",  seq:10,
+      en:"Worries excessively about exams, friendships, family, or future — hard to reassure",
+      hi:"परीक्षाओं, दोस्तों, परिवार, या भविष्य की अत्यधिक चिंता — आश्वस्त करना मुश्किल",
+      mr:"परीक्षा, मैत्री, कुटुंब किंवा भविष्याबद्दल अत्यधिक काळजी — आश्वस्त करणे कठीण" },
+    { id:"PI10", domain:"IDD",  seq:11,
+      en:"Needs regular assistance with self-care tasks — hygiene, organisation, meals — beyond what is typical for age",
+      hi:"स्वयं की देखभाल — स्वच्छता, संगठन, भोजन — के लिए उम्र के हिसाब से ज्यादा नियमित मदद चाहिए",
+      mr:"स्वत:ची काळजी — स्वच्छता, संघटन, जेवण — यासाठी वयाच्या मानाने जास्त नियमित मदत लागते" },
+    { id:"PI11", domain:"IDD",  seq:12,
+      en:"Shows behaviour that causes social problems, embarrassment, or conflict in peer and school settings",
+      hi:"ऐसा व्यवहार करता है जो साथियों और स्कूल में सामाजिक समस्याएं, शर्मिंदगी या विवाद पैदा करता है",
+      mr:"समवयस्क आणि शाळेत सामाजिक समस्या, लाज किंवा संघर्ष निर्माण करणारे वर्तन करतो/करते" },
+    { id:"ASD18",domain:"ASD",  seq:13,
+      en:"Shows repetitive body movements or self-stimulatory behaviours that are difficult to interrupt",
+      hi:"दोहराए जाने वाले शारीरिक हरकतें या स्व-उत्तेजक व्यवहार दिखाता है जिन्हें रोकना मुश्किल है",
+      mr:"वारंवार शारीरिक हालचाली किंवा स्व-उत्तेजक वर्तन दाखवतो/दाखवते जे थांबवणे कठीण आहे" },
+    { id:"ADD31",domain:"ADHD", seq:14,
+      en:"Frequently loses or misplaces belongings, homework, important documents, or stationery",
+      hi:"सामान, होमवर्क, महत्वपूर्ण कागज, या स्टेशनरी बार-बार खो देता या गलत जगह रख देता है",
+      mr:"सामान, गृहपाठ, महत्त्वाची कागदपत्रे किंवा स्टेशनरी वारंवार हरवते किंवा चुकीच्या ठिकाणी ठेवले जाते" },
+    { id:"SLD37",domain:"SLD",  seq:15,
+      en:"Has difficulty with sequencing, word problems, or mathematical reasoning in class-level work",
+      hi:"कक्षा स्तर के काम में क्रम, शाब्दिक समस्याओं, या गणितीय तर्क में कठिनाई",
+      mr:"वर्ग स्तरावरील कामात क्रम, शब्द समस्या किंवा गणितीय तर्कात अडचण" },
+    { id:"MDD46",domain:"MDD",  seq:16,
+      en:"Often seems persistently low in mood, hopeless, or feels that nothing matters or will improve",
+      hi:"अक्सर लगातार मूड खराब, हताश, या लगता है कि कुछ मायने नहीं रखता या सुधरेगा नहीं",
+      mr:"बऱ्याचदा सतत मनःस्थिती खालावलेली, हताश किंवा काहीही महत्त्वाचे नाही किंवा सुधारणार नाही असे वाटते" },
+    { id:"ANX60",domain:"ANX",  seq:17,
+      en:"Is consumed by persistent, hard-to-control worry or dread — often cannot say exactly what they fear",
+      hi:"लगातार, नियंत्रण में मुश्किल चिंता या डर से ग्रसित है — अक्सर ठीक से नहीं बता पाता कि क्या डर है",
+      mr:"सतत, नियंत्रण करणे कठीण अशा काळजीने किंवा भीतीने ग्रस्त — अनेकदा नेमकी काय भीती आहे हे सांगता येत नाही" },
+    { id:"PI12", domain:"IDD",  seq:18,
+      en:"Needs regular supervision or reminders to complete daily tasks safely and appropriately",
+      hi:"दैनिक कार्यों को सुरक्षित और उचित तरीके से पूरा करने के लिए नियमित निगरानी या याद दिलाने की जरूरत",
+      mr:"दैनंदिन कामे सुरक्षितपणे आणि योग्यरित्या पूर्ण करण्यासाठी नियमित देखरेख किंवा आठवण करून देण्याची गरज" },
+    { id:"ASD21",domain:"ASD",  seq:19,
+      en:"Insists on rigid routines or specific ways of doing things — intense distress when disrupted",
+      hi:"चीजों को करने के कठोर तरीके या विशेष दिनचर्या पर जोर देता है — बाधित होने पर तीव्र परेशानी",
+      mr:"गोष्टी करण्याच्या कठोर नित्यक्रमावर किंवा विशिष्ट पद्धतीवर आग्रह — विस्कळीत झाल्यावर तीव्र संकट" },
+    { id:"ADD33",domain:"ADHD", seq:20,
+      en:"Feels constantly restless, fidgety, or unable to slow down — internal motor that won't stop",
+      hi:"लगातार बेचैनी, छटपटाहट, या धीमा होने में असमर्थ — एक आंतरिक मोटर जो रुकती नहीं",
+      mr:"सतत अस्वस्थ, चुळबुळ किंवा मंद होण्यास असमर्थ — न थांबणारी आंतरिक मोटर" },
+    { id:"ASD25",domain:"ASD",  seq:21,
+      en:"Shows clearly slower processing speed or learning pace compared to peers — without other obvious explanation",
+      hi:"साथियों की तुलना में स्पष्ट रूप से धीमी प्रसंस्करण गति या सीखने की गति — बिना किसी अन्य स्पष्ट कारण के",
+      mr:"समवयस्कांच्या तुलनेत स्पष्टपणे मंद प्रक्रिया गती किंवा शिकण्याचा वेग — इतर कोणत्याही स्पष्ट कारणाशिवाय" },
+    { id:"SLD41",domain:"SLD",  seq:22,
+      en:"Has poor handwriting, difficulty with fine motor tasks, or poor hand-eye coordination",
+      hi:"लिखावट खराब है, बारीक मोटर कामों में कठिनाई है, या हाथ-आँख का तालमेल कम है",
+      mr:"लेखन अव्यवस्थित आहे, बारीक मोटर कामांत अडचण आहे, किंवा हात-डोळा समन्वय कमी आहे" },
+    { id:"ANX62",domain:"ANX",  seq:23,
+      en:"Has physical anxiety symptoms — nausea, headaches, breathlessness, restlessness, or irritability",
+      hi:"शारीरिक चिंता के लक्षण — जी मचलाना, सिरदर्द, सांस फूलना, बेचैनी, या चिड़चिड़ापन",
+      mr:"शारीरिक चिंतेची लक्षणे — मळमळ, डोकेदुखी, श्वास लागणे, अस्वस्थपणा किंवा चिडचिडेपणा" },
+    { id:"ODD51",domain:"ODD",  seq:24,
+      en:"Frequently argues with, defies, or refuses reasonable requests from parents and teachers",
+      hi:"माता-पिता और शिक्षकों के उचित अनुरोधों पर अक्सर बहस करता है, अवज्ञा करता है, या मना करता है",
+      mr:"पालक आणि शिक्षकांच्या वाजवी विनंत्यांना वारंवार वाद घालतो/घालते, अवज्ञा करतो/करते किंवा नकार देतो/देते" },
+    { id:"CD53", domain:"CD",   seq:25,
+      en:"Repeatedly breaks serious rules, lies, steals, bullies, or behaves in ways that harm others",
+      hi:"बार-बार महत्वपूर्ण नियम तोड़ता है, झूठ बोलता है, चोरी करता है, धमकाता है, या दूसरों को नुकसान पहुंचाने वाला व्यवहार करता है",
+      mr:"वारंवार महत्त्वाचे नियम मोडतो/मोडते, खोटे बोलतो/बोलते, चोरी करतो/करते, दादागिरी करतो/करते किंवा इतरांना दुखवणारे वर्तन करतो/करते" },
+    { id:"CD55", domain:"CD",   seq:26,
+      en:"Is persistently rude, threatening, or physically aggressive towards peers or adults",
+      hi:"साथियों या बड़ों के प्रति लगातार असभ्य, धमकी देने वाला, या शारीरिक रूप से आक्रामक है",
+      mr:"समवयस्कांशी किंवा मोठ्यांशी सतत असभ्य, धमकावणारा/धमकावणारी किंवा शारीरिकदृष्ट्या आक्रमक आहे" },
+  ],
+
+  // ── HIGHER SECONDARY  16–18 years ─────────────────────────
+  hig: [
+    { id:"CI2",  domain:"IDD",  seq:1,
+      en:"Falls significantly behind peers in academic performance, reasoning, and learning across all subjects",
+      hi:"सभी विषयों में शैक्षणिक प्रदर्शन, तर्क और सीखने में साथियों से काफी पीछे है",
+      mr:"सर्व विषयांत शैक्षणिक कामगिरी, तर्क आणि शिकण्यात समवयस्कांपेक्षा लक्षणीयरित्या मागे आहे" },
+    { id:"CI3",  domain:"IDD",  seq:2,
+      en:"Requires ongoing adult support and much longer time to understand new ideas, skills, or concepts",
+      hi:"नए विचारों, कौशल, या अवधारणाओं को समझने के लिए निरंतर बड़े की मदद और बहुत ज्यादा समय चाहिए",
+      mr:"नवीन कल्पना, कौशल्ये किंवा संकल्पना समजण्यासाठी सतत मोठ्यांचा आधार आणि खूप जास्त वेळ लागतो" },
+    { id:"SI6",  domain:"IDD",  seq:3,
+      en:"Has difficulty understanding abstract concepts, implied meanings, or what others think and feel",
+      hi:"अमूर्त अवधारणाओं, निहित अर्थ, या दूसरे क्या सोचते और महसूस करते हैं यह समझने में कठिनाई",
+      mr:"अमूर्त संकल्पना, अव्यक्त अर्थ किंवा इतर काय विचार करतात आणि काय वाटते हे समजण्यात अडचण" },
+    { id:"SI7",  domain:"IDD",  seq:4,
+      en:"Shows marked differences from peers in how they communicate, form relationships, and socially connect",
+      hi:"साथियों से स्पष्ट रूप से अलग तरह से संवाद करता है, रिश्ते बनाता है, और सामाजिक रूप से जुड़ता है",
+      mr:"समवयस्कांपेक्षा स्पष्टपणे वेगळ्या पद्धतीने संवाद करतो/करते, नाती जोडतो/जोडते आणि सामाजिकरित्या संपर्क साधतो/साधते" },
+    { id:"ADD27",domain:"ADHD", seq:5,
+      en:"Has significant difficulty maintaining concentration on studies, tasks, or responsibilities for adequate time",
+      hi:"पर्याप्त समय के लिए पढ़ाई, काम, या जिम्मेदारियों पर ध्यान बनाए रखने में काफी कठिनाई",
+      mr:"पुरेसा वेळ अभ्यास, काम किंवा जबाबदाऱ्यांवर लक्ष केंद्रित ठेवण्यात लक्षणीय अडचण" },
+    { id:"ADD29",domain:"ADHD", seq:6,
+      en:"Leaves most tasks, assignments, or responsibilities incomplete — persistent poor follow-through",
+      hi:"अधिकांश काम, असाइनमेंट, या जिम्मेदारियां अधूरी छोड़ देता है — लगातार काम पूरा न करना",
+      mr:"बहुतेक कामे, असाइनमेंट किंवा जबाबदाऱ्या अपूर्ण सोडतो/सोडते — सतत काम पूर्ण न होणे" },
+    { id:"ASD14",domain:"ASD",  seq:7,
+      en:"Avoids or has significant difficulty maintaining eye contact in social situations and conversations",
+      hi:"सामाजिक स्थितियों और बातचीत में आँखों का संपर्क बनाए रखने से बचता है या काफी कठिनाई होती है",
+      mr:"सामाजिक परिस्थिती आणि संभाषणात नजरेचा संपर्क टाळतो/टाळते किंवा टिकवण्यात लक्षणीय अडचण" },
+    { id:"SLD34",domain:"SLD",  seq:8,
+      en:"Has difficulty with spatial organisation — loses place in text or notes, struggles with directions or layouts",
+      hi:"स्थानिक संगठन में कठिनाई — पाठ या नोट्स में जगह खो देता है, दिशाओं या लेआउट से संघर्ष करता है",
+      mr:"स्थानिक संघटनात अडचण — मजकूर किंवा नोट्समध्ये जागा हरवते, दिशा किंवा मांडणीत संघर्ष" },
+    { id:"MDD44",domain:"MDD",  seq:9,
+      en:"Often appears emotionally flat, sad, or has lost interest in activities and people they once enjoyed",
+      hi:"अक्सर भावनात्मक रूप से सपाट, उदास दिखता है, या उन गतिविधियों और लोगों में रुचि खो दी है जो पहले पसंद थे",
+      mr:"बऱ्याचदा भावनिकदृष्ट्या सपाट, उदास दिसतो/दिसते, किंवा आधी आवडलेल्या क्रिया आणि लोकांमध्ये रस गमावला आहे" },
+    { id:"ANX49",domain:"ANX",  seq:10,
+      en:"Worries intensely and persistently about academic performance, future, health, or relationships",
+      hi:"शैक्षणिक प्रदर्शन, भविष्य, स्वास्थ्य, या रिश्तों के बारे में गहरी और लगातार चिंता",
+      mr:"शैक्षणिक कामगिरी, भविष्य, आरोग्य किंवा नात्यांबद्दल तीव्र आणि सतत काळजी" },
+    { id:"PI10", domain:"IDD",  seq:11,
+      en:"Requires support with self-care, personal organisation, or daily living skills beyond age expectations",
+      hi:"स्वयं की देखभाल, व्यक्तिगत संगठन, या दैनिक जीवन कौशल में उम्र की अपेक्षाओं से परे मदद चाहिए",
+      mr:"स्वत:ची काळजी, वैयक्तिक संघटन किंवा दैनंदिन जीवन कौशल्यांसाठी वयाच्या अपेक्षेपलीकडे आधार लागतो" },
+    { id:"PI11", domain:"IDD",  seq:12,
+      en:"Exhibits behaviour that creates significant social difficulties, conflict, or isolation among peers",
+      hi:"ऐसा व्यवहार करता है जो साथियों में महत्वपूर्ण सामाजिक कठिनाइयां, विवाद, या अलगाव पैदा करता है",
+      mr:"समवयस्कांमध्ये लक्षणीय सामाजिक अडचणी, संघर्ष किंवा एकटेपणा निर्माण करणारे वर्तन करतो/करते" },
+    { id:"ASD18",domain:"ASD",  seq:13,
+      en:"Engages in repetitive movements, rituals, or self-stimulatory behaviours that are persistent and intrusive",
+      hi:"लगातार और दखल देने वाली दोहराव वाली हरकतें, अनुष्ठान, या स्व-उत्तेजक व्यवहार में लगा रहता है",
+      mr:"सतत आणि व्यत्यय आणणाऱ्या वारंवार हालचाली, विधी किंवा स्व-उत्तेजक वर्तनात गुंतलेला/गुंतलेली असतो/असते" },
+    { id:"ADD31",domain:"ADHD", seq:14,
+      en:"Consistently loses or misplaces important items — phone, notes, keys, identity cards, stationery",
+      hi:"महत्वपूर्ण चीजें — फोन, नोट्स, चाबियाँ, पहचान पत्र, स्टेशनरी — लगातार खो देता या गलत जगह रख देता है",
+      mr:"महत्त्वाच्या वस्तू — फोन, नोट्स, चाव्या, ओळखपत्र, स्टेशनरी — सतत हरवतात किंवा चुकीच्या ठिकाणी ठेवल्या जातात" },
+    { id:"SLD37",domain:"SLD",  seq:15,
+      en:"Has persistent difficulty with complex reasoning, word problems, or mathematical thinking",
+      hi:"जटिल तर्क, शाब्दिक समस्याओं, या गणितीय सोच में लगातार कठिनाई",
+      mr:"जटिल तर्क, शब्द समस्या किंवा गणितीय विचारात सतत अडचण" },
+    { id:"MDD46",domain:"MDD",  seq:16,
+      en:"Frequently feels or expresses hopelessness, worthlessness, or a persistently severe low mood",
+      hi:"अक्सर निराशा, निरर्थकता, या लगातार गहरे खराब मूड की भावना या अभिव्यक्ति करता है",
+      mr:"वारंवार हतबलता, नालायकपणाची भावना किंवा सतत तीव्र उदास मनःस्थिती जाणवते किंवा व्यक्त केली जाते" },
+    { id:"ANX60",domain:"ANX",  seq:17,
+      en:"Is overwhelmed by constant, uncontrollable worry or dread — about life, studies, health, or the future",
+      hi:"जीवन, पढ़ाई, स्वास्थ्य, या भविष्य के बारे में लगातार, अनियंत्रणीय चिंता या डर से अभिभूत है",
+      mr:"जीवन, अभ्यास, आरोग्य किंवा भविष्याबद्दल सतत, अनियंत्रित काळजी किंवा भीतीने व्यापलेला/व्यापलेली आहे" },
+    { id:"PI12", domain:"IDD",  seq:18,
+      en:"Requires regular reminders, supervision, or support to manage daily responsibilities and stay safe",
+      hi:"दैनिक जिम्मेदारियों को संभालने और सुरक्षित रहने के लिए नियमित याद दिलाने, निगरानी, या मदद की जरूरत",
+      mr:"दैनंदिन जबाबदाऱ्या सांभाळण्यासाठी आणि सुरक्षित राहण्यासाठी नियमित आठवण, देखरेख किंवा आधाराची गरज" },
+    { id:"ASD21",domain:"ASD",  seq:19,
+      en:"Demands strict routines or patterns in daily life — any unexpected change causes intense distress or meltdown",
+      hi:"दैनिक जीवन में कठोर दिनचर्या या पैटर्न की मांग करता है — कोई भी अप्रत्याशित बदलाव तीव्र संकट पैदा करता है",
+      mr:"दैनंदिन जीवनात कठोर नित्यक्रम किंवा पॅटर्नची मागणी करतो/करते — कोणताही अनपेक्षित बदल तीव्र संकट निर्माण करतो" },
+    { id:"ADD33",domain:"ADHD", seq:20,
+      en:"Experiences persistent inner restlessness, cannot relax or switch off — feels driven by a constant internal motor",
+      hi:"लगातार आंतरिक बेचैनी का अनुभव करता है, आराम नहीं कर सकता — एक लगातार आंतरिक मोटर से संचालित महसूस करता है",
+      mr:"सतत आंतरिक अस्वस्थता जाणवते, आराम करू शकत नाही किंवा स्विच ऑफ करू शकत नाही — सतत आंतरिक मोटरने चालवल्यासारखे वाटते" },
+    { id:"ASD25",domain:"ASD",  seq:21,
+      en:"Demonstrates noticeably slower information processing or learning speed compared to peers without an obvious cause",
+      hi:"बिना किसी स्पष्ट कारण के साथियों की तुलना में स्पष्ट रूप से धीमी जानकारी प्रसंस्करण या सीखने की गति",
+      mr:"कोणत्याही स्पष्ट कारणाशिवाय समवयस्कांच्या तुलनेत स्पष्टपणे मंद माहिती प्रक्रिया किंवा शिकण्याचा वेग" },
+    { id:"SLD41",domain:"SLD",  seq:22,
+      en:"Has difficulty with fine motor tasks, quality of handwriting, or hand-eye coordination in daily activities",
+      hi:"दैनिक गतिविधियों में बारीक मोटर काम, लिखावट की गुणवत्ता, या हाथ-आँख तालमेल में कठिनाई",
+      mr:"दैनंदिन क्रियांमध्ये बारीक मोटर काम, लेखनाची गुणवत्ता किंवा हात-डोळा समन्वयात अडचण" },
+    { id:"ANX62",domain:"ANX",  seq:23,
+      en:"Experiences physical symptoms of anxiety: palpitations, nausea, breathlessness, trembling, or persistent restlessness",
+      hi:"चिंता के शारीरिक लक्षण अनुभव करता है: धड़कन, जी मचलाना, सांस फूलना, कांपना, या लगातार बेचैनी",
+      mr:"चिंतेची शारीरिक लक्षणे अनुभवतो/अनुभवते: धडधडणे, मळमळ, श्वास लागणे, थरथरणे किंवा सतत अस्वस्थपणा" },
+    { id:"ODD51",domain:"ODD",  seq:24,
+      en:"Persistently argues with, refuses, or openly defies authority figures — parents, teachers, or employers",
+      hi:"माता-पिता, शिक्षकों, या नियोक्ताओं जैसे अधिकार के प्रतीकों के साथ लगातार बहस करता है, मना करता है, या खुलकर अवज्ञा करता है",
+      mr:"पालक, शिक्षक किंवा नियोक्ते यांसारख्या अधिकाऱ्यांशी सतत वाद घालतो/घालते, नकार देतो/देते किंवा उघडपणे अवज्ञा करतो/करते" },
+    { id:"CD53", domain:"CD",   seq:25,
+      en:"Engages in deliberate rule-breaking, dishonesty, aggression, or behaviour that seriously harms others",
+      hi:"जानबूझकर नियम तोड़ना, बेईमानी, आक्रामकता, या दूसरों को गंभीर नुकसान पहुंचाने वाले व्यवहार में शामिल है",
+      mr:"जाणूनबुजून नियम मोडणे, अप्रामाणिकता, आक्रमकता किंवा इतरांना गंभीरपणे दुखवणाऱ्या वर्तनात सहभागी होतो/होते" },
+    { id:"CD55", domain:"CD",   seq:26,
+      en:"Shows bullying, intimidation, or aggression — disregard for others' safety, wellbeing, or rights",
+      hi:"दूसरों की सुरक्षा, भलाई, या अधिकारों की अनदेखी करते हुए धमकाना, डराना, या आक्रामकता दिखाता है",
+      mr:"इतरांची सुरक्षितता, कल्याण किंवा हक्कांकडे दुर्लक्ष करून दादागिरी, धमकावणे किंवा आक्रमकता दाखवतो/दाखवते" },
+  ],
 };
 
-function getScale(ageYrs) {
-  if (ageYrs < 8)  return {scale:1, norms:S1_NORMS, maxRaw:30};
-  if (ageYrs < 14) return {scale:2, norms:S2_NORMS, maxRaw:46};
-  return              {scale:3, norms:S3_NORMS, maxRaw:50};
+const LIKERT = [
+  { v:0, en:"Not True",        hi:"सच नहीं",    mr:"खरे नाही",     bg:"#dcfce7", border:"#86efac", text:"#166534" },
+  { v:1, en:"Rarely True",     hi:"शायद ही",    mr:"क्वचितच",      bg:"#fef9c3", border:"#fde047", text:"#854d0e" },
+  { v:2, en:"Sometimes True",  hi:"कभी-कभी",    mr:"कधी-कधी",      bg:"#ffedd5", border:"#fdba74", text:"#9a3412" },
+  { v:3, en:"Mostly True",     hi:"अक्सर सच",   mr:"बहुतेक खरे",   bg:"#fee2e2", border:"#fca5a5", text:"#991b1b" },
+  { v:4, en:"Absolutely True", hi:"बिल्कुल सच", mr:"पूर्णपणे खरे", bg:"#fecaca", border:"#ef4444", text:"#7f1d1d" },
+];
+
+// Evidence-based cutoffs from CIBS dataset (Normal N=55, Clinical N=281)
+const DCFG = {
+  IDD:  { items:["CI2","CI3","SI6","SI7","PI10","PI11","PI12"], max:28, color:"#7c3aed", atRisk:7,  prob:12, sev:18, dsm5:"Intellectual Disability",                   icd11:"6A00" },
+  ADHD: { items:["ADD27","ADD29","ADD31","ADD33"],               max:16, color:"#2563eb", atRisk:5,  prob:8,  sev:12, dsm5:"ADHD",                                       icd11:"6A05" },
+  ASD:  { items:["ASD14","ASD18","ASD21","ASD25"],               max:16, color:"#0891b2", atRisk:4,  prob:7,  sev:12, dsm5:"Autism Spectrum Disorder",                   icd11:"6A02" },
+  SLD:  { items:["SLD34","SLD37","SLD41"],                       max:12, color:"#0d9488", atRisk:3,  prob:6,  sev:9,  dsm5:"Specific Learning Disorder",                 icd11:"6A03" },
+  MDD:  { items:["MDD44","MDD46"],                               max:8,  color:"#dc2626", atRisk:4,  prob:5,  sev:7,  dsm5:"Major Depressive Disorder",                  icd11:"6A70" },
+  ANX:  { items:["ANX49","ANX60","ANX62"],                       max:12, color:"#ea580c", atRisk:3,  prob:5,  sev:9,  dsm5:"Generalised / Social / Separation Anxiety",   icd11:"6B00" },
+  ODD:  { items:["ODD51"],                                       max:4,  color:"#b45309", atRisk:3,  prob:4,  sev:4,  dsm5:"Oppositional Defiant Disorder",               icd11:"6C90" },
+  CD:   { items:["CD53","CD55"],                                 max:8,  color:"#9f1239", atRisk:4,  prob:6,  sev:7,  dsm5:"Conduct Disorder",                            icd11:"6C91" },
+};
+
+const SM = [
+  { id:"sm1", en:"Has your child talked about wanting to hurt themselves?",              hi:"क्या बच्चे ने खुद को नुकसान पहुंचाने की बात की है?",            mr:"मुलाने स्वतःला इजा करण्याबद्दल बोलले का?" },
+  { id:"sm2", en:"Has your child said they wish they were dead or not alive?",           hi:"क्या बच्चे ने मरना चाहने की बात की है?",                         mr:"मुलाने मरण्याची इच्छा बोलून दाखवली का?" },
+  { id:"sm3", en:"Any attempt to hurt themselves intentionally?",                        hi:"क्या बच्चे ने जानबूझकर खुद को नुकसान पहुंचाने की कोशिश की?",   mr:"मुलाने जाणूनबुजून स्वतःला दुखवण्याचा प्रयत्न केला का?" },
+  { id:"sm4", en:"Have they mentioned how they would hurt themselves?",                  hi:"क्या उन्होंने बताया कि वह खुद को कैसे नुकसान पहुंचाएंगे?",       mr:"त्यांनी स्वतःला कसे दुखवणार हे सांगितले का?" },
+  { id:"sm5", en:"Does your child have access to medicines, sharp objects, or poisons?", hi:"क्या बच्चे के पास दवाइयाँ, धारदार वस्तुएं या ज़हर तक पहुँच है?", mr:"मुलाकडे औषधे, धारदार वस्तू किंवा विष मिळण्याचा मार्ग आहे का?" },
+  { id:"sm6", en:"Are caregivers aware and able to provide close monitoring?",           hi:"क्या देखभालकर्ता निकट निगरानी कर सकते हैं?",                    mr:"काळजीवाहू जागरूक आहेत आणि जवळून देखरेख करू शकतात का?" },
+];
+
+// ════════════════════════════════════════════════════════════════
+// SCORING ENGINE
+// ════════════════════════════════════════════════════════════════
+function getSeverity(total, cfg) {
+  if (total < cfg.atRisk) return "Normal";
+  if (total < cfg.prob)   return "Mild";
+  if (total < cfg.sev)    return "Moderate";
+  return "Severe";
 }
-
-function rawToMA(raw, gender, norms) {
-  const g = (gender==="F") ? "F" : "M";
-  const ages = Object.keys(norms[g]).map(Number).sort((a,b)=>a-b);
-  // Find the two age brackets that bracket this raw score
-  for (let i = 0; i < ages.length - 1; i++) {
-    const lo = norms[g][ages[i]], hi = norms[g][ages[i+1]];
-    if (raw >= lo && raw <= hi) {
-      const frac = (hi - lo) > 0 ? (raw - lo) / (hi - lo) : 0;
-      return ages[i] + frac * (ages[i+1] - ages[i]);
-    }
+function computeScores(bx) {
+  const s = {};
+  for (const [d, c] of Object.entries(DCFG)) {
+    const total = c.items.reduce((a, id) => a + (Number(bx[id]) || 0), 0);
+    s[d] = { total, sev:getSeverity(total,c), pct:Math.round((total/c.max)*100), max:c.max, color:c.color,
+             atRiskPct:Math.round((c.atRisk/c.max)*100), probPct:Math.round((c.prob/c.max)*100) };
   }
-  if (raw <= norms[g][ages[0]])  return Math.max(ages[0] - 1, ages[0] * raw / Math.max(norms[g][ages[0]], 1));
-  return ages[ages.length - 1] + 0.5;
+  return s;
+}
+function getRiskLevel(s, t) {
+  const aff = Object.entries(s).filter(([,x]) => x.sev !== "Normal");
+  const n = aff.length, dn = aff.map(([d]) => d);
+  if (n===0) return { lv:0, label:"Normal Development",        tag:"NORMAL",  color:"#16a34a", bg:"#dcfce7", border:"#86efac", action:t.riskActions[0], domains:[] };
+  if (n===1) return { lv:1, label:"Mild Risk — Monitor",       tag:"LEVEL 1", color:"#65a30d", bg:"#f7fee7", border:"#bef264", action:t.riskActions[1], domains:dn };
+  if (n===2) return { lv:2, label:"Moderate Risk — Refer",     tag:"LEVEL 2", color:"#d97706", bg:"#fffbeb", border:"#fcd34d", action:t.riskActions[2], domains:dn };
+  return           { lv:3, label:"High Risk — Urgent",         tag:"LEVEL 3", color:"#dc2626", bg:"#fef2f2", border:"#fca5a5", action:t.riskActions[3], domains:dn };
+}
+function getSuicideFlag(s) {
+  return s.ADHD?.sev!=="Normal" && (s.MDD?.total||0)>=4 &&
+    (s.ODD?.sev==="Moderate"||s.ODD?.sev==="Severe"||s.CD?.sev==="Moderate"||s.CD?.sev==="Severe");
+}
+function getPeriRisk(p) {
+  const n = Object.values(p).filter(v=>v==="yes").length;
+  if (n===0) return { n, level:"None",     color:"#16a34a", bg:"#dcfce7" };
+  if (n<=2)  return { n, level:"Low",      color:"#65a30d", bg:"#f7fee7" };
+  if (n<=5)  return { n, level:"Moderate", color:"#d97706", bg:"#fffbeb" };
+  return      { n, level:"High",    color:"#dc2626", bg:"#fef2f2" };
+}
+function getFutureRisks(s, rl, sf) {
+  const cdP = s.CD?.sev==="Moderate"||s.CD?.sev==="Severe";
+  const oddP = s.ODD?.sev==="Moderate"||s.ODD?.sev==="Severe";
+  const mddAR = s.MDD?.sev!=="Normal";
+  return [
+    { label:"Deliberate Self-Harm (DSH)",           icon:"🔪", up: sf||(mddAR&&oddP) },
+    { label:"Suicidal Behaviour",                    icon:"⚡", up: sf },
+    { label:"Delinquency",                           icon:"⚖️", up: cdP&&oddP },
+    { label:"Conduct Problems",                      icon:"🔥", up: cdP||oddP },
+    { label:"Substance Use Disorder (future risk)",  icon:"💊", up: rl.lv>=3&&cdP },
+  ];
 }
 
-function computeFIS(rawScores, ageYrs, gender) {
-  const { scale, norms, maxRaw } = getScale(ageYrs);
-  const total = Object.values(rawScores).reduce((a,b) => a + b, 0);
-  const ma    = rawToMA(total, gender, norms);
-  const ca    = Math.min(ageYrs, 16); // cap at 16 for Gf norms per Cattell
-  const iq    = Math.round((ma / ca) * 100);
-  const pct   = iqToPct(iq);
-  return { total, maxRaw, ma: Math.round(ma * 10) / 10, iq, pct, scale, ...iqClass(iq) };
+// ════════════════════════════════════════════════════════════════
+// CSV EXPORT
+// ════════════════════════════════════════════════════════════════
+function makeCSV(ci, ageInfo, p, bx, S, RL, SF, sm) {
+  const ts = new Date().toISOString();
+  const hP = PERINATAL.map(i=>`P${i.id}`).join(",");
+  const hB = BXITEMS.pri.map(i=>i.id).join(",");  // IDs are same across groups
+  const hD = Object.keys(DCFG).map(d=>`${d}_score,${d}_sev`).join(",");
+  const hS = SM.map(i=>i.id).join(",");
+  const header = `Timestamp,AgeGroup,AgYears,FileNo,RegNo,Name,DOB,Age,Gender,School,Examiner,Informant,Relation,${hP},${hB},${hD},RiskTag,SuicideFlag,${hS}`;
+  const rP = PERINATAL.map(i=>p[i.id]||"").join(",");
+  const rB = BXITEMS.pri.map(i=>bx[i.id]??"").join(",");
+  const rD = Object.entries(S).map(([,x])=>`${x.total},${x.sev}`).join(",");
+  const rS = SM.map(i=>sm[i.id]?"YES":"NO").join(",");
+  const ageYrs = ageInfo.age ? ageInfo.age.toFixed(1) : "";
+  const row = [ts,ageInfo.group,ageYrs,ci.fileNo,ci.regNo,ci.name,ci.dob,ci.age,ci.gender,ci.school,ci.examiner,ci.informantName,ci.relation,rP,rB,rD,RL.tag,SF?"FLAGGED":"Clear",rS].join(",");
+  const blob = new Blob([header+"\n"+row],{type:"text/csv"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href=url; a.download=`eSMART_P_${ci.fileNo||"rec"}_${ts.slice(0,10)}.csv`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-function iqToPct(iq) {
-  const z = (iq - 100) / 24;
-  const t = 1 / (1 + 0.2316419 * Math.abs(z));
-  const d = 0.3989423 * Math.exp(-z * z / 2);
-  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.7814779 + t * (-1.8212560 + t * 1.3302744))));
-  const cdf = z >= 0 ? 1 - p : p;
-  return Math.max(1, Math.min(99, Math.round(cdf * 100)));
-}
-
-function iqClass(iq) {
-  if (iq >= 148) return {band:"Exceptionally Gifted",  color:"#085041", bg:"#E1F5EE", edu:"Gifted education programme recommended"};
-  if (iq >= 124) return {band:"Very Superior",         color:"#0F6E56", bg:"#E1F5EE", edu:"Advanced curriculum, enrichment activities"};
-  if (iq >= 112) return {band:"Superior",              color:"#3B6D11", bg:"#EAF3DE", edu:"Challenging coursework, competitive exams"};
-  if (iq >= 100) return {band:"High Average",          color:"#0d5c6e", bg:"#f0f9f6", edu:"Standard curriculum with enrichment"};
-  if (iq >= 88)  return {band:"Average",               color:"#374151", bg:"#f8fafc", edu:"Standard curriculum"};
-  if (iq >= 76)  return {band:"Low Average",           color:"#633806", bg:"#FAEEDA", edu:"Additional learning support recommended"};
-  if (iq >= 64)  return {band:"Borderline",            color:"#712B13", bg:"#FAECE7", edu:"Special education evaluation recommended"};
-  if (iq >= 52)  return {band:"Mild Intellectual Disability", color:"#791F1F", bg:"#FCEBEB", edu:"Modified curriculum, resource room"};
-  return               {band:"Moderate-Severe ID",     color:"#501313", bg:"#FCEBEB", edu:"Specialist evaluation and therapeutic intervention"};
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-//  SHAPE RENDERER  — programmatic SVG, completely original artwork
-// ══════════════════════════════════════════════════════════════════════════════
-// t: 0=circle, 3=triangle, 4=square, 5=pentagon, 6=hexagon, -1=dot, "D"=diamond
-// f: 0=hollow, 1=filled, 2=hatched
-// s: 0=small, 1=medium, 2=large
-// r: rotation degrees
-function Fig({ t=4, f=0, s=1, r=0, dim=52, extra=null }) {
-  const c = dim / 2;
-  const br = dim / 2 - 4;
-  const rad = br * [0.42, 0.66, 0.88][s];
-  const sid = "#1e3a5f";
-  const fc  = f === 0 ? "none" : f === 1 ? "#1e3a5f" : "#7096bc";
-  const sw  = dim < 40 ? 1.4 : 1.9;
-
-  const poly = (n, cx, cy, rr) =>
-    Array.from({length: n}, (_, i) => {
-      const a = i * 2 * Math.PI / n - Math.PI / 2;
-      return `${cx + rr * Math.cos(a)},${cy + rr * Math.sin(a)}`;
-    }).join(" ");
-
-  const renderShape = (tp, cx, cy, rr, rotation) => {
-    const tr = rotation ? `rotate(${rotation} ${cx} ${cy})` : undefined;
-    if (tp === -1)  return <circle cx={cx} cy={cy} r={rr * 0.22} fill="#1e3a5f"/>;
-    if (tp === 0)   return <circle cx={cx} cy={cy} r={rr} fill={fc} stroke={sid} strokeWidth={sw}/>;
-    if (tp === "D") return <polygon points={`${cx},${cy-rr} ${cx+rr},${cy} ${cx},${cy+rr} ${cx-rr},${cy}`} fill={fc} stroke={sid} strokeWidth={sw}/>;
-    return <polygon points={poly(tp, cx, cy, rr)} fill={fc} stroke={sid} strokeWidth={sw} transform={tr}/>;
-  };
-
-  return (
-    <svg width={dim} height={dim} viewBox={`0 0 ${dim} ${dim}`} overflow="visible">
-      {renderShape(t, c, c, rad, r)}
-      {extra && renderShape(extra.t, c, c, rad * 0.40, 0)}
-    </svg>
-  );
-}
-
-// Multi-figure cell (for count-based items)
-function MultiFig({ figs, dim=52 }) {
-  if (!figs || figs.length === 0) return <Fig dim={dim}/>;
-  if (figs.length === 1) return <Fig {...figs[0]} dim={dim}/>;
-  const n = figs.length;
-  // Arrange in 2x2 grid or row
-  const positions = n === 2
-    ? [[0.3, 0.5], [0.7, 0.5]]
-    : n === 3
-    ? [[0.2, 0.5], [0.5, 0.2], [0.8, 0.5]]
-    : [[0.3, 0.3], [0.7, 0.3], [0.3, 0.7], [0.7, 0.7]];
-  const small = dim * 0.38;
-  return (
-    <svg width={dim} height={dim} viewBox={`0 0 ${dim} ${dim}`}>
-      {figs.slice(0, positions.length).map((fig, i) => {
-        const [px, py] = positions[i];
-        return (
-          <svg key={i} x={px * dim - small / 2} y={py * dim - small / 2} width={small} height={small}>
-            <Fig {...fig} dim={small}/>
-          </svg>
-        );
-      })}
-    </svg>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-//  CIBS-FIS ITEM BANK  — 46 original items, 4 subtests
-//  All items are ORIGINAL CIBS works. Cognitive rules derived from Cattell's
-//  theoretical framework (public domain science). No CFIT artwork reproduced.
-//  Acknowledgement: Cattell, R.B. (1949, 1973). Culture Fair Intelligence Test.
-//  Institute for Personality and Ability Testing, Champaign, IL.
-// ══════════════════════════════════════════════════════════════════════════════
-
-// Fig notation: {t, f, s, r, extra, figs(for multi)}
-// difficulty 1=easy, 2=medium, 3=hard (for adaptive use)
-
-// SERIES ITEMS — show 3 figs in sequence, pick 4th (from 5 choices)
-const SERIES = [
-  // 1. Sides increase: T→S→P→? (H)
-  { d:1, seq:[{t:3,f:0,s:1},{t:4,f:0,s:1},{t:5,f:0,s:1}],
-    choices:[{t:0,f:0,s:1},{t:3,f:0,s:1},{t:6,f:0,s:1},{t:4,f:0,s:1},{t:5,f:1,s:1}], ans:2 },
-
-  // 2. Fill alternates hollow→filled→hollow→? (filled)
-  { d:1, seq:[{t:4,f:0,s:1},{t:4,f:1,s:1},{t:4,f:0,s:1}],
-    choices:[{t:4,f:2,s:1},{t:3,f:1,s:1},{t:4,f:0,s:1},{t:4,f:1,s:1},{t:0,f:1,s:1}], ans:3 },
-
-  // 3. Count increases 1→2→3→? (4 shapes)
-  { d:1,
-    seq:[{figs:[{t:3,f:1,s:0}]},{figs:[{t:3,f:1,s:0},{t:3,f:1,s:0}]},{figs:[{t:3,f:1,s:0},{t:3,f:1,s:0},{t:3,f:1,s:0}]}],
-    choices:[
-      {figs:[{t:3,f:1,s:0},{t:3,f:1,s:0}]},
-      {figs:[{t:3,f:1,s:0},{t:3,f:1,s:0},{t:3,f:1,s:0},{t:3,f:1,s:0}]},
-      {figs:[{t:4,f:1,s:0},{t:4,f:1,s:0},{t:4,f:1,s:0}]},
-      {figs:[{t:3,f:1,s:0}]},
-      {figs:[{t:3,f:0,s:0},{t:3,f:0,s:0},{t:3,f:0,s:0},{t:3,f:0,s:0}]},
-    ], ans:1 },
-
-  // 4. Sides decrease H→P→S→? (T)
-  { d:1, seq:[{t:6,f:0,s:1},{t:5,f:0,s:1},{t:4,f:0,s:1}],
-    choices:[{t:0,f:0,s:1},{t:3,f:0,s:1},{t:6,f:0,s:1},{t:5,f:0,s:1},{t:3,f:1,s:1}], ans:1 },
-
-  // 5. Rotation +90° each step: T(0)→T(90)→T(180)→? T(270 = equivalent 0+extra)
-  // Use 45° increments for clarity: 0→45→90→135
-  { d:1, seq:[{t:3,f:1,s:1,r:0},{t:3,f:1,s:1,r:45},{t:3,f:1,s:1,r:90}],
-    choices:[{t:3,f:1,s:1,r:90},{t:3,f:1,s:1,r:0},{t:3,f:0,s:1,r:135},{t:3,f:1,s:1,r:135},{t:4,f:1,s:1,r:45}], ans:3 },
-
-  // 6. Shape progresses, fill stays hollow: T,h→S,h→P,h; inner dot added each time
-  { d:2, seq:[{t:4,f:0,s:1},{t:4,f:0,s:1,extra:{t:-1}},{t:5,f:0,s:1}],
-    choices:[{t:5,f:0,s:1,extra:{t:-1}},{t:4,f:1,s:1},{t:6,f:0,s:1},{t:5,f:1,s:1,extra:{t:-1}},{t:4,f:0,s:1,extra:{t:-1}}], ans:0 },
-
-  // 7. Size increases: small→medium→large→? (back to small but filled)
-  { d:2, seq:[{t:0,f:0,s:0},{t:0,f:0,s:1},{t:0,f:0,s:2}],
-    choices:[{t:0,f:0,s:1},{t:0,f:1,s:0},{t:0,f:0,s:0},{t:0,f:1,s:2},{t:0,f:2,s:0}], ans:1 },
-
-  // 8. Two rules: sides increase AND fill toggles: T_h→S_f→P_h→? (H_f)
-  { d:2, seq:[{t:3,f:0,s:1},{t:4,f:1,s:1},{t:5,f:0,s:1}],
-    choices:[{t:6,f:0,s:1},{t:5,f:1,s:1},{t:6,f:1,s:1},{t:3,f:1,s:1},{t:6,f:2,s:1}], ans:2 },
-
-  // 9. Inner shape progresses: Circle[no inner]→Circle[T inside]→Circle[S inside]→?
-  { d:2,
-    seq:[{t:0,f:0,s:2},{t:0,f:0,s:2,extra:{t:3,f:1}},{t:0,f:0,s:2,extra:{t:4,f:1}}],
-    choices:[{t:0,f:0,s:2,extra:{t:6,f:1}},{t:0,f:0,s:2,extra:{t:3,f:0}},{t:0,f:0,s:2,extra:{t:5,f:1}},{t:0,f:1,s:2},{t:0,f:0,s:1,extra:{t:4,f:1}}], ans:2 },
-
-  // 10. Rotation + fill: S(0,h)→S(45,f)→S(90,h)→? S(135,f)
-  { d:2, seq:[{t:4,f:0,s:1,r:0},{t:4,f:1,s:1,r:45},{t:4,f:0,s:1,r:90}],
-    choices:[{t:4,f:0,s:1,r:135},{t:4,f:1,s:1,r:90},{t:4,f:1,s:1,r:0},{t:4,f:1,s:1,r:135},{t:3,f:1,s:1,r:135}], ans:3 },
-
-  // 11. Compound: size increases by 1 step AND shape sides increase by 1
-  // T_small→S_med→P_large→? (H_large? no — H loops back to T but xl=not available)
-  // Use: T_small→S_med→P_large→H_small (wrap size, continue sides)
-  { d:3, seq:[{t:3,f:1,s:0},{t:4,f:1,s:1},{t:5,f:1,s:2}],
-    choices:[{t:6,f:1,s:2},{t:6,f:1,s:1},{t:6,f:1,s:0},{t:5,f:1,s:0},{t:3,f:1,s:2}], ans:2 },
-
-  // 12. Hardest: Three-attribute rule — shape, size, AND fill all cycle independently
-  // T_s_h → S_m_f → P_l_h → H_s_f → ? → back or: T_m_h (shape wraps, size continues, fill continues)
-  // Show: T(s,h), S(m,f), P(l,h). Answer: H(s,f) — sides+1, size wraps s, fill toggles
-  { d:3, seq:[{t:3,f:0,s:0},{t:4,f:1,s:1},{t:5,f:0,s:2}],
-    choices:[{t:6,f:1,s:1},{t:6,f:0,s:0},{t:3,f:1,s:0},{t:6,f:1,s:0},{t:6,f:0,s:1}], ans:3 },
-];
-
-// CLASSIFICATION ITEMS — show 5 figs, pick odd one out (0-based index)
-const CLASSIF = [
-  // 1. 4 circles, 1 square
-  { d:1, figs:[{t:0,f:0,s:1},{t:0,f:0,s:1},{t:4,f:0,s:1},{t:0,f:0,s:1},{t:0,f:0,s:1}], ans:2 },
-  // 2. 4 filled, 1 hollow (same triangle)
-  { d:1, figs:[{t:3,f:1,s:1},{t:3,f:1,s:1},{t:3,f:1,s:1},{t:3,f:0,s:1},{t:3,f:1,s:1}], ans:3 },
-  // 3. 4 medium, 1 small
-  { d:1, figs:[{t:4,f:0,s:1},{t:4,f:0,s:0},{t:4,f:0,s:1},{t:4,f:0,s:1},{t:4,f:0,s:1}], ans:1 },
-  // 4. 4 triangles, 1 has inner dot
-  { d:1, figs:[{t:3,f:0,s:1},{t:3,f:0,s:1},{t:3,f:0,s:1},{t:3,f:0,s:1,extra:{t:-1}},{t:3,f:0,s:1}], ans:3 },
-  // 5. 4 hollow, 1 hatched
-  { d:1, figs:[{t:5,f:0,s:1},{t:5,f:0,s:1},{t:5,f:0,s:1},{t:5,f:0,s:1},{t:5,f:2,s:1}], ans:4 },
-  // 6. 4 shapes with even sides (S,H,S,H,S), 1 with odd (T)
-  { d:2, figs:[{t:4,f:0,s:1},{t:6,f:0,s:1},{t:3,f:0,s:1},{t:4,f:0,s:1},{t:6,f:0,s:1}], ans:2 },
-  // 7. 4 rotated 0°, 1 rotated 90°
-  { d:2, figs:[{t:3,f:1,s:1,r:0},{t:3,f:1,s:1,r:0},{t:3,f:1,s:1,r:90},{t:3,f:1,s:1,r:0},{t:3,f:1,s:1,r:0}], ans:2 },
-  // 8. 4 have inner circle, 1 has inner triangle
-  { d:2, figs:[{t:4,f:0,s:2,extra:{t:0,f:1}},{t:4,f:0,s:2,extra:{t:0,f:1}},{t:4,f:0,s:2,extra:{t:3,f:1}},{t:4,f:0,s:2,extra:{t:0,f:1}},{t:4,f:0,s:2,extra:{t:0,f:1}}], ans:2 },
-  // 9. 4 same shape different size, 1 different shape same medium size
-  { d:2, figs:[{t:0,f:1,s:0},{t:0,f:1,s:1},{t:4,f:1,s:1},{t:0,f:1,s:2},{t:0,f:1,s:1}], ans:2 },
-  // 10. 4 triangles with dot, 1 triangle without dot (reverse of rule)
-  { d:2, figs:[{t:3,f:0,s:1,extra:{t:-1}},{t:3,f:0,s:1,extra:{t:-1}},{t:3,f:0,s:1,extra:{t:-1}},{t:3,f:0,s:1,extra:{t:-1}},{t:3,f:0,s:1}], ans:4 },
-  // 11. 4 polygons (3+ sides), 1 circle (no sides — belongs to different "family")
-  { d:2, figs:[{t:3,f:0,s:1},{t:5,f:0,s:1},{t:0,f:0,s:1},{t:4,f:0,s:1},{t:6,f:0,s:1}], ans:2 },
-  // 12. 4 large hollow, 1 small filled — TWO attributes different
-  { d:3, figs:[{t:4,f:0,s:2},{t:4,f:0,s:2},{t:4,f:0,s:2},{t:4,f:1,s:0},{t:4,f:0,s:2}], ans:3 },
-  // 13. 4 share property: all have inner shape; 1 is filled solid with no inner
-  { d:3, figs:[{t:6,f:0,s:2,extra:{t:3,f:1}},{t:6,f:0,s:2,extra:{t:3,f:1}},{t:6,f:1,s:2},{t:6,f:0,s:2,extra:{t:3,f:1}},{t:6,f:0,s:2,extra:{t:3,f:1}}], ans:2 },
-  // 14. Abstract: 4 are reflections (180° rotation) of a base shape; 1 is rotated 90° (not a reflection)
-  { d:3, figs:[{t:3,f:2,s:1,r:180},{t:3,f:2,s:1,r:0},{t:3,f:2,s:1,r:180},{t:3,f:2,s:1,r:90},{t:3,f:2,s:1,r:0}], ans:3 },
-];
-
-// MATRIX ITEMS — 3×3 grid, bottom-right missing, pick from 5 choices
-// Each item: rows[3][3] where rows[2][2] = null (the ? cell)
-// Rules: shape/fill/size change across rows and/or down columns
-const MATRICES = [
-  // M1: shape changes across row (T,S,P), same across all rows. Fill same. Easy.
-  { d:1,
-    rows:[[{t:3,f:0,s:1},{t:4,f:0,s:1},{t:5,f:0,s:1}],[{t:3,f:0,s:1},{t:4,f:0,s:1},{t:5,f:0,s:1}],[{t:3,f:0,s:1},{t:4,f:0,s:1},null]],
-    choices:[{t:5,f:0,s:1},{t:3,f:0,s:1},{t:6,f:0,s:1},{t:4,f:0,s:1},{t:5,f:1,s:1}], ans:0 },
-
-  // M2: fill changes down column (h,f,h), shape same. Easy.
-  { d:1,
-    rows:[[{t:4,f:0,s:1},{t:4,f:0,s:1},{t:4,f:0,s:1}],[{t:4,f:1,s:1},{t:4,f:1,s:1},{t:4,f:1,s:1}],[{t:4,f:0,s:1},{t:4,f:0,s:1},null]],
-    choices:[{t:4,f:1,s:1},{t:3,f:0,s:1},{t:4,f:0,s:1},{t:4,f:2,s:1},{t:0,f:0,s:1}], ans:2 },
-
-  // M3: size changes across row (s,m,l), same shape, hollow. Easy-medium.
-  { d:1,
-    rows:[[{t:0,f:1,s:0},{t:0,f:1,s:1},{t:0,f:1,s:2}],[{t:0,f:1,s:0},{t:0,f:1,s:1},{t:0,f:1,s:2}],[{t:0,f:1,s:0},{t:0,f:1,s:1},null]],
-    choices:[{t:0,f:1,s:0},{t:0,f:0,s:2},{t:0,f:1,s:1},{t:0,f:1,s:2},{t:3,f:1,s:2}], ans:3 },
-
-  // M4: shape changes across row, fill changes down column. Medium.
-  { d:2,
-    rows:[[{t:3,f:0,s:1},{t:4,f:0,s:1},{t:5,f:0,s:1}],[{t:3,f:1,s:1},{t:4,f:1,s:1},{t:5,f:1,s:1}],[{t:3,f:2,s:1},{t:4,f:2,s:1},null]],
-    choices:[{t:5,f:1,s:1},{t:4,f:2,s:1},{t:5,f:2,s:1},{t:5,f:0,s:1},{t:3,f:2,s:1}], ans:2 },
-
-  // M5: shape changes (T,S,P), size changes (s,m,l) — both rules active. Medium.
-  { d:2,
-    rows:[[{t:3,f:1,s:0},{t:4,f:1,s:1},{t:5,f:1,s:2}],[{t:3,f:0,s:0},{t:4,f:0,s:1},{t:5,f:0,s:2}],[{t:3,f:2,s:0},{t:4,f:2,s:1},null]],
-    choices:[{t:5,f:2,s:1},{t:5,f:2,s:2},{t:5,f:0,s:2},{t:4,f:2,s:2},{t:5,f:2,s:0}], ans:1 },
-
-  // M6: rotation changes: 0→90→180 across row; shape constant. Medium.
-  { d:2,
-    rows:[[{t:3,f:1,s:1,r:0},{t:3,f:1,s:1,r:90},{t:3,f:1,s:1,r:180}],[{t:4,f:0,s:1,r:0},{t:4,f:0,s:1,r:90},{t:4,f:0,s:1,r:180}],[{t:5,f:2,s:1,r:0},{t:5,f:2,s:1,r:90},null]],
-    choices:[{t:5,f:2,s:1,r:0},{t:5,f:0,s:1,r:180},{t:5,f:2,s:1,r:180},{t:3,f:2,s:1,r:180},{t:5,f:2,s:2,r:180}], ans:2 },
-
-  // M7: inner shape changes down (no inner, dot, circle inside). Medium-hard.
-  { d:2,
-    rows:[[{t:4,f:0,s:2},{t:4,f:0,s:2},{t:4,f:0,s:2}],[{t:4,f:0,s:2,extra:{t:-1}},{t:4,f:0,s:2,extra:{t:-1}},{t:4,f:0,s:2,extra:{t:-1}}],[{t:4,f:0,s:2,extra:{t:0,f:1}},{t:4,f:0,s:2,extra:{t:0,f:1}},null]],
-    choices:[{t:4,f:0,s:2},{t:4,f:0,s:2,extra:{t:-1}},{t:4,f:0,s:2,extra:{t:0,f:1}},{t:4,f:1,s:2},{t:0,f:0,s:2,extra:{t:0,f:1}}], ans:2 },
-
-  // M8: two shapes combine rules — row: shape changes; col: fill changes. Hard.
-  { d:3,
-    rows:[[{t:6,f:0,s:1},{t:5,f:0,s:1},{t:3,f:0,s:1}],[{t:6,f:1,s:1},{t:5,f:1,s:1},{t:3,f:1,s:1}],[{t:6,f:2,s:1},{t:5,f:2,s:1},null]],
-    choices:[{t:6,f:2,s:1},{t:3,f:2,s:2},{t:3,f:2,s:1},{t:5,f:2,s:1},{t:3,f:1,s:1}], ans:2 },
-
-  // M9: progressive: each cell shape = previous shape + 1 side, size decrements.
-  { d:3,
-    rows:[[{t:3,f:1,s:2},{t:4,f:1,s:1},{t:5,f:1,s:0}],[{t:4,f:0,s:2},{t:5,f:0,s:1},{t:6,f:0,s:0}],[{t:5,f:2,s:2},{t:6,f:2,s:1},null]],
-    choices:[{t:6,f:2,s:1},{t:3,f:2,s:0},{t:6,f:0,s:0},{t:5,f:2,s:0},{t:3,f:2,s:2}], ans:1 },
-
-  // M10: alternating fill across diagonal + shape constant. Hard.
-  { d:3,
-    rows:[[{t:0,f:1,s:1},{t:0,f:0,s:1},{t:0,f:1,s:1}],[{t:0,f:0,s:1},{t:0,f:1,s:1},{t:0,f:0,s:1}],[{t:0,f:1,s:1},{t:0,f:0,s:1},null]],
-    choices:[{t:0,f:0,s:1},{t:0,f:1,s:1},{t:3,f:1,s:1},{t:0,f:2,s:1},{t:0,f:0,s:2}], ans:1 },
-
-  // M11: size increases diagonally. Hard.
-  { d:3,
-    rows:[[{t:4,f:0,s:0},{t:4,f:0,s:0},{t:4,f:0,s:1}],[{t:4,f:0,s:0},{t:4,f:0,s:1},{t:4,f:0,s:2}],[{t:4,f:0,s:1},{t:4,f:0,s:2},null]],
-    choices:[{t:4,f:0,s:1},{t:4,f:0,s:2},{t:4,f:1,s:2},{t:0,f:0,s:2},{t:4,f:0,s:0}], ans:1 },
-
-  // M12: Hardest — combined rule: across row: shape cycle (T→S→P); down col: fill cycle (h→f→ha); missing = P,ha,l
-  { d:3,
-    rows:[[{t:3,f:0,s:2},{t:4,f:0,s:2},{t:5,f:0,s:2}],[{t:3,f:1,s:2},{t:4,f:1,s:2},{t:5,f:1,s:2}],[{t:3,f:2,s:2},{t:4,f:2,s:2},null]],
-    choices:[{t:4,f:2,s:2},{t:5,f:0,s:2},{t:5,f:1,s:2},{t:5,f:2,s:2},{t:3,f:2,s:2}], ans:3 },
-];
-
-// CONDITIONS ITEMS — reference box shows shape + dot position; pick matching choice
-// dot position: "in"=inside, "out"=outside, "tl"=top-left, "tr"=top-right, "bl"=bottom-left, "br"=bottom-right, "top","bot","left","right"
-const CONDITIONS = [
-  // C1: Dot inside circle — pick the one with dot inside (not outside)
-  { d:1, ref:{shape:0, dot:"in"},
-    choices:[{shape:0,dot:"out"},{shape:0,dot:"in"},{shape:3,dot:"in"},{shape:0,dot:"out"},{shape:0,dot:"top"}], ans:1 },
-  // C2: Dot outside circle (below) — pick matching
-  { d:1, ref:{shape:0, dot:"bot"},
-    choices:[{shape:0,dot:"in"},{shape:0,dot:"top"},{shape:0,dot:"bot"},{shape:3,dot:"bot"},{shape:0,dot:"left"}], ans:2 },
-  // C3: Dot inside square, upper-left zone
-  { d:2, ref:{shape:4, dot:"tl"},
-    choices:[{shape:4,dot:"tr"},{shape:4,dot:"bl"},{shape:4,dot:"tl"},{shape:4,dot:"br"},{shape:0,dot:"tl"}], ans:2 },
-  // C4: Dot outside triangle, to the right
-  { d:2, ref:{shape:3, dot:"right"},
-    choices:[{shape:3,dot:"left"},{shape:3,dot:"right"},{shape:3,dot:"top"},{shape:3,dot:"in"},{shape:4,dot:"right"}], ans:1 },
-  // C5: Dot at top of pentagon
-  { d:2, ref:{shape:5, dot:"top"},
-    choices:[{shape:5,dot:"in"},{shape:5,dot:"bot"},{shape:6,dot:"top"},{shape:5,dot:"top"},{shape:5,dot:"left"}], ans:3 },
-  // C6: Dot between two nested shapes: inside outer, outside inner
-  { d:3, ref:{shape:4, dot:"in"}, // square with circle inside, dot is in square but outside circle
-    choices:[{shape:4,dot:"out"},{shape:4,dot:"in"},{shape:0,dot:"in"},{shape:4,dot:"tl"},{shape:4,dot:"br"}], ans:1 },
-  // C7: Dot at bottom-right of hexagon
-  { d:3, ref:{shape:6, dot:"br"},
-    choices:[{shape:6,dot:"tr"},{shape:6,dot:"bl"},{shape:6,dot:"br"},{shape:6,dot:"in"},{shape:3,dot:"br"}], ans:2 },
-  // C8: Dot at left of shape
-  { d:3, ref:{shape:5, dot:"left"},
-    choices:[{shape:5,dot:"right"},{shape:5,dot:"top"},{shape:5,dot:"left"},{shape:5,dot:"bot"},{shape:6,dot:"left"}], ans:2 },
-];
-
-// ══════════════════════════════════════════════════════════════════════════════
-//  CONDITIONS RENDERER — shows shape + dot in specified position
-// ══════════════════════════════════════════════════════════════════════════════
-function CondFig({ shape=0, dot="in", dim=52 }) {
-  const c = dim / 2, r = dim / 2 - 6;
-  const sid = "#1e3a5f";
-  const poly = (n) => Array.from({length:n}, (_,i) => {
-    const a = i * 2 * Math.PI / n - Math.PI / 2;
-    return `${c + r * Math.cos(a)},${c + r * Math.sin(a)}`;
-  }).join(" ");
-  const shapeEl = shape === 0 ? <circle cx={c} cy={c} r={r} fill="none" stroke={sid} strokeWidth={1.8}/>
-    : <polygon points={poly(shape)} fill="none" stroke={sid} strokeWidth={1.8}/>;
-  const dotPositions = {
-    in:    [c, c],         out:  [c, dim - 4],
-    top:   [c, 3],         bot:  [c, dim - 3],
-    left:  [3, c],         right:[dim - 3, c],
-    tl:    [c*0.4, c*0.4], tr:   [c*1.6, c*0.4],
-    bl:    [c*0.4, c*1.6], br:   [c*1.6, c*1.6],
-  };
-  const [dx, dy] = dotPositions[dot] || [c, c];
-  return (
-    <svg width={dim} height={dim} viewBox={`0 0 ${dim} ${dim}`}>
-      {shapeEl}
-      <circle cx={dx} cy={dy} r={3.2} fill="#1e3a5f"/>
-    </svg>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-//  PRACTICE ITEM
-// ══════════════════════════════════════════════════════════════════════════════
-const PRACTICE = {
-  seq: [{t:3,f:0,s:1},{t:4,f:0,s:1},{t:5,f:0,s:1}],
-  choices: [{t:0,f:0,s:1},{t:6,f:0,s:1},{t:3,f:1,s:1},{t:4,f:0,s:1},{t:5,f:0,s:2}],
-  ans: 1,
-};
-
-// ══════════════════════════════════════════════════════════════════════════════
-//  SCSS DATA (Dr Pangaonkar, CIBS — from SCST_Clinical_2)
-// ══════════════════════════════════════════════════════════════════════════════
-const SHAPES_SCSS = [{code:1,name:"Circle"},{code:2,name:"Triangle"},{code:3,name:"Square"},{code:4,name:"Rhombus"},{code:5,name:"Pentagon"},{code:6,name:"Hexagon"},{code:7,name:"Octagon"}];
-const COLORS_SCSS = [{code:1,name:"Red",hex:"#EF4444"},{code:2,name:"Orange",hex:"#F97316"},{code:3,name:"Yellow",hex:"#EAB308"},{code:4,name:"Green",hex:"#22C55E"},{code:5,name:"Blue",hex:"#3B82F6"},{code:6,name:"Indigo",hex:"#6366F1"},{code:7,name:"Violet",hex:"#A855F7"}];
-const SMILEYS_SCSS = [{code:1,name:"Very Happy",emoji:"😄"},{code:2,name:"Happy",emoji:"🙂"},{code:3,name:"Calm",emoji:"😐"},{code:4,name:"Worried",emoji:"😟"},{code:5,name:"Sad",emoji:"😢"},{code:6,name:"Angry",emoji:"😠"},{code:7,name:"Scared",emoji:"😨"}];
-const SHAPE_DATA = {1:{name:"Circle",complexity:3,cogStyle:"Holistic-Integrative",BFopen:5,BFcons:3,BFextra:5,BFagree:6,BFneuro:3},2:{name:"Triangle",complexity:4,cogStyle:"Analytical-Sequential",BFopen:5,BFcons:5,BFextra:4,BFagree:3,BFneuro:4},3:{name:"Square",complexity:2,cogStyle:"Practical-Systematic",BFopen:2,BFcons:7,BFextra:3,BFagree:5,BFneuro:3},4:{name:"Rhombus",complexity:5,cogStyle:"Adaptive-Creative",BFopen:6,BFcons:4,BFextra:5,BFagree:4,BFneuro:3},5:{name:"Pentagon",complexity:6,cogStyle:"Divergent-Exploratory",BFopen:7,BFcons:3,BFextra:4,BFagree:4,BFneuro:4},6:{name:"Hexagon",complexity:6,cogStyle:"Systemic-Precise",BFopen:5,BFcons:7,BFextra:3,BFagree:5,BFneuro:2},7:{name:"Octagon",complexity:5,cogStyle:"Tenacious-Enduring",BFopen:4,BFcons:6,BFextra:3,BFagree:4,BFneuro:3}};
-const COLOR_DATA = {1:{name:"Red",temp:"hot",arousal:7,valence:4,BFextra:7,BFneuro:6,physArousal:"High",socialWarm:6},2:{name:"Orange",temp:"warm",arousal:6,valence:6,BFextra:6,BFneuro:4,physArousal:"Elevated",socialWarm:7},3:{name:"Yellow",temp:"warm",arousal:5,valence:7,BFextra:5,BFneuro:3,physArousal:"Moderate",socialWarm:6},4:{name:"Green",temp:"cool",arousal:4,valence:6,BFextra:4,BFneuro:2,physArousal:"Moderate",socialWarm:5},5:{name:"Blue",temp:"cool",arousal:3,valence:6,BFextra:3,BFneuro:2,physArousal:"Low",socialWarm:4},6:{name:"Indigo",temp:"dark-cool",arousal:3,valence:4,BFextra:2,BFneuro:4,physArousal:"Low",socialWarm:3},7:{name:"Violet",temp:"dark-cool",arousal:4,valence:4,BFextra:2,BFneuro:5,physArousal:"Low",socialWarm:3}};
-const SHADE_DATA = {1:{label:"Shade 1 (Lightest)",rawEmo:95,mentalBurden:5,emotOpen:95,ruminScore:5},2:{label:"Shade 2 (Light)",rawEmo:82,mentalBurden:15,emotOpen:82,ruminScore:12},3:{label:"Shade 3",rawEmo:70,mentalBurden:28,emotOpen:68,ruminScore:22},4:{label:"Shade 4 (Medium)",rawEmo:55,mentalBurden:44,emotOpen:52,ruminScore:38},5:{label:"Shade 5",rawEmo:40,mentalBurden:58,emotOpen:36,ruminScore:55},6:{label:"Shade 6 (Dark)",rawEmo:28,mentalBurden:73,emotOpen:22,ruminScore:70},7:{label:"Shade 7 (Darkest)",rawEmo:15,mentalBurden:88,emotOpen:10,ruminScore:85}};
-const SMILEY_DATA = {1:{name:"Very Happy",valence:95,arousal:72,negAffect:5,anx:3,dep:3,anger:3,fear:3},2:{name:"Happy",valence:80,arousal:58,negAffect:15,anx:10,dep:10,anger:8,fear:8},3:{name:"Calm",valence:65,arousal:32,negAffect:28,anx:20,dep:18,anger:12,fear:15},4:{name:"Worried",valence:35,arousal:62,negAffect:58,anx:65,dep:38,anger:30,fear:55},5:{name:"Sad",valence:20,arousal:22,negAffect:75,anx:35,dep:78,anger:22,fear:40},6:{name:"Angry",valence:15,arousal:88,negAffect:80,anx:42,dep:35,anger:88,fear:35},7:{name:"Scared",valence:10,arousal:72,negAffect:85,anx:88,dep:55,anger:30,fear:88}};
-
-function iqBand(cq){if(cq>=130)return{band:"Very Superior",percentile:"≥98th"};if(cq>=120)return{band:"Superior",percentile:"91–97th"};if(cq>=110)return{band:"High Average",percentile:"75–90th"};if(cq>=90)return{band:"Average",percentile:"25–74th"};if(cq>=80)return{band:"Low Average",percentile:"9–24th"};if(cq>=70)return{band:"Borderline",percentile:"2–8th"};return{band:"Intellectually Limited",percentile:"<2nd"};}
-function eqBand(eq){if(eq>=115)return{band:"Well Above Average",percentile:"≥84th"};if(eq>=100)return{band:"Above Average",percentile:"50–83rd"};if(eq>=85)return{band:"Average",percentile:"16–49th"};if(eq>=70)return{band:"Below Average",percentile:"2–15th"};return{band:"Well Below Average",percentile:"<2nd"};}
-function phqAnalog(score){if(score<=10)return{level:"None to Minimal",severity:0};if(score<=25)return{level:"Mild",severity:1};if(score<=50)return{level:"Moderate",severity:2};if(score<=75)return{level:"Moderately Severe",severity:3};return{level:"Severe",severity:4};}
-function riskLevel(score){if(score<=15)return{level:"Not Indicated",color:"#16a34a",bg:"#f0fdf4",border:"#86efac",flag:0};if(score<=35)return{level:"Low",color:"#65a30d",bg:"#f7fee7",border:"#bef264",flag:1};if(score<=55)return{level:"Moderate",color:"#d97706",bg:"#fffbeb",border:"#fcd34d",flag:2};if(score<=75)return{level:"Elevated",color:"#ea580c",bg:"#fff7ed",border:"#fdba74",flag:3};return{level:"High",color:"#dc2626",bg:"#fef2f2",border:"#fca5a5",flag:4};}
-
-function computeClinical(sSeq,cSeq,shSeq,smSeq){
-  const W=[7,6,5,4,3,2,1];
-  const s0=sSeq[0],c0=cSeq[0],sh0=shSeq[0],sm0=smSeq[0];
-  const SD=SHADE_DATA,CD=COLOR_DATA,SMD=SMILEY_DATA,SHD=SHAPE_DATA;
-
-  // D1: COGNITIVE
-  let wtd=0,maxWtd=0;
-  sSeq.forEach((code,i)=>{wtd+=SHD[code].complexity*W[i];maxWtd+=7*W[i];});
-  const rawCog=(wtd/maxWtd)*100;
-  const CQ=Math.round(55+(rawCog/100)*90);
-  const iq=iqBand(CQ);
-  const cogFlex=Math.abs(SHD[sSeq[0]].complexity-SHD[sSeq[6]].complexity);
-  const flexLabel=cogFlex>=4?"High":cogFlex>=2?"Moderate":"Restricted";
-  const isWarm=["hot","warm"].includes(CD[c0].temp);
-  const isDarkCool=CD[c0].temp==="dark-cool";
-  const isAngular=[2,4,5].includes(s0),isRounded=s0===1,isSymm=[3,6].includes(s0);
-  const procOrient=isWarm?"Action-Oriented / Externally Motivated":isDarkCool?"Reflective / Internally Motivated":"Balanced Processing Orientation";
-  const midComplexity=SHD[sSeq[3]].complexity;
-  const midLabel=midComplexity>=5?"High-Complexity Neutral Baseline":midComplexity>=4?"Mid-Range Baseline":"Low-Complexity Neutral Baseline";
-  const d1={CQ,iqBand:iq,primaryStyle:SHD[s0].cogStyle,secondaryStyle:SHD[sSeq[1]].cogStyle,
-    flexIndex:cogFlex,flexLabel,procOrient,rawCog:Math.round(rawCog),
-    topShape:SHD[sSeq[0]],secondShape:SHD[sSeq[1]],midShape:SHD[sSeq[3]],botShape:SHD[sSeq[6]],
-    midLabel,colorInfluence:CD[c0].name};
-
-  // D2: PERSONALITY
-  const shapeW=0.6,colorW=0.4;
-  let BF={O:0,C:0,E:0,A:0,N:0};
-  sSeq.forEach((code,i)=>{const sh=SHD[code];const w=W[i]/28;BF.O+=sh.BFopen*w*shapeW;BF.C+=sh.BFcons*w*shapeW;BF.E+=sh.BFextra*w*shapeW;BF.A+=sh.BFagree*w*shapeW;BF.N+=sh.BFneuro*w*shapeW;});
-  const col=CD[c0];BF.E+=col.BFextra/7*colorW;BF.N+=col.BFneuro/7*colorW;
-  BF.N+=SD[sh0].mentalBurden/100*0.3;BF.N=Math.min(BF.N,1.0);
-  const BFt={};["O","C","E","A","N"].forEach(k=>{BFt[k]=Math.round(30+BF[k]*40);});
-  const hN=BFt.N>=55,lE=BFt.E<45;
-  let dsmCluster,dsmFeatures,dsmDesc,dsmClinical;
-  if(isDarkCool&&(isAngular||s0===7)&&lE){
-    dsmCluster="Cluster A Alignment";dsmFeatures="Schizoid / Schizotypal features";
-    dsmDesc="Tendency towards social withdrawal, restricted emotional expression, preference for solitary activity, possible unconventional thinking patterns.";
-    dsmClinical="Assess for flat affect, anhedonia, social isolation. Rule out prodromal schizophrenia spectrum in younger subjects.";
-  }else if(isWarm&&isAngular&&(hN||BFt.E>=58)){
-    dsmCluster="Cluster B Alignment";dsmFeatures="Borderline / Histrionic / Narcissistic features";
-    dsmDesc="Tendency towards emotional intensity, impulsivity, attention-seeking, affective instability, and interpersonal boundary difficulties.";
-    dsmClinical="Assess for impulsivity, affective dysregulation, identity instability. Screen for trauma history. Monitor for externalising behaviours.";
-  }else if(!isWarm&&(isRounded||isSymm)&&hN){
-    dsmCluster="Cluster C Alignment";dsmFeatures="Avoidant / Dependent / OCPD features";
-    dsmDesc="Tendency towards anxiety-based inhibition, rigid rule adherence, excessive need for reassurance, fear of criticism.";
-    dsmClinical="Assess for generalised anxiety, social anxiety features, perfectionism. Consider impact on daily functioning and relationships.";
-  }else{
-    dsmCluster="No Significant Cluster Alignment";dsmFeatures="Adaptive personality organisation";
-    dsmDesc="No clinically significant personality cluster alignment. Subject demonstrates balanced adaptive traits with context-appropriate behavioural flexibility.";
-    dsmClinical="No specific personality-based clinical concerns at this time. Supportive monitoring sufficient.";
-  }
-  const bfDesc={
-    O:BFt.O>=55?"Elevated — high intellectual curiosity, openness, creative ideation":BFt.O<45?"Reduced — preference for conventional, concrete approaches":"Within average range",
-    C:BFt.C>=55?"Elevated — high self-discipline, organisation, goal-directedness":BFt.C<45?"Reduced — may present with impulsivity, difficulty sustaining effort":"Within average range",
-    E:BFt.E>=55?"Elevated — socially outgoing, high energy, assertive":BFt.E<45?"Reduced — reserved, socially selective, prefers limited stimulation":"Within average range",
-    A:BFt.A>=55?"Elevated — cooperative, prosocial, trusting, conflict-avoidant":BFt.A<45?"Reduced — competitive, sceptical, challenging of authority":"Within average range",
-    N:BFt.N>=55?"Elevated — marked emotional reactivity, vulnerability to distress":BFt.N<45?"Reduced — emotionally stable, resilient, low distress susceptibility":"Within average range",
-  };
-  const d2={BFt,bfDesc,dsmCluster,dsmFeatures,dsmDesc,dsmClinical};
-
-  // D3: EMOTIONAL INTELLIGENCE
-  const shadeEmo=SD[sh0].rawEmo;const smVal=SMD[sm0].valence;
-  const shEQmod=isRounded?10:isAngular?-8:isSymm?4:2;
-  const cEQmod=["cool"].includes(CD[c0].temp)?8:isDarkCool?0:isWarm?-4:0;
-  const rawEQ=Math.min(100,Math.max(0,shadeEmo*0.5+smVal*0.3+shEQmod+cEQmod));
-  const EQSS=Math.round(55+(rawEQ/100)*90);
-  const eqB=eqBand(EQSS);
-  const selfAwareness=Math.min(100,Math.round(SD[sh0].emotOpen*0.7+smVal*0.3));
-  const emoRegulation=Math.min(100,Math.round(shadeEmo*0.6+(100-SMD[sm0].negAffect)*0.4));
-  const emoResilience=Math.min(100,Math.round(rawCog*0.3+shadeEmo*0.4+(100-SD[sh0].ruminScore)*0.3));
-  const ESI=Math.round((selfAwareness+emoRegulation+emoResilience)/3);
-  const affValence=smVal>=70?"Positive":smVal>=45?"Neutral-Mixed":smVal>=25?"Negative-Mild":"Negative-Significant";
-  const d3={EQSS,eqBand:eqB,rawEQ:Math.round(rawEQ),ESI,selfAwareness,emoRegulation,emoResilience,
-    shadePrimary:SD[sh0],affState:SMD[sm0].name,affValence,ruminScore:SD[sh0].ruminScore};
-
-  // D4: HEALTH
-  const distressRaw=Math.round(SMD[sm0].negAffect*0.35+SD[sh0].mentalBurden*0.35+SMD[sm0].dep*0.15+SMD[sm0].anx*0.15);
-  const MHI=100-distressRaw;
-  const phqA=phqAnalog(distressRaw);
-  const anxIdx=Math.round(SMD[sm0].anx*0.6+SD[sh0].ruminScore*0.4);
-  const depIdx=Math.round(SMD[sm0].dep*0.6+SD[sh0].mentalBurden*0.4);
-  const physScore=Math.round(100-(CD[c0].arousal-1)*12+(isRounded?5:isAngular?-4:0));
-  const physNorm=Math.min(95,Math.max(25,physScore));
-  const physArousal=CD[c0].physArousal||"Moderate";
-  const socRaw=Math.round(CD[c0].socialWarm/7*50+(isRounded?50:isAngular?30:40)+SMD[sm0].valence*0.15);
-  const SFI=Math.min(95,Math.max(20,socRaw));
-  const sfLevel=SFI>=70?"Adequate – Social engagement indicators within functional range":SFI>=50?"Moderate – Some social withdrawal indicated":"Limited – Significant social isolation indicated";
-  const overallWBI=Math.round((MHI+physNorm+SFI)/3);
-  const d4={MHI,distressRaw,phqAnalog:phqA,
-    anxIdx,anxLevel:anxIdx>=70?"Elevated":anxIdx>=45?"Moderate":anxIdx>=25?"Mild":"Minimal",
-    depIdx,depLevel:depIdx>=70?"Elevated":depIdx>=45?"Moderate":depIdx>=25?"Mild":"Minimal",
-    physArousal,physNorm,SFI,sfLevel,overallWBI};
-
-  // D5: RISK
-  const SIR_raw=Math.round(SD[sh0].ruminScore*0.3+SMD[sm0].dep*0.25+SD[sh0].mentalBurden*0.25+(isDarkCool?15:0)+(sm0>=5?SMD[sm0].fear*0.2:0));
-  const SUR_raw=Math.round(SMD[sm0].negAffect*0.25+SD[sh0].mentalBurden*0.20+CD[c0].arousal/7*35+(isAngular?15:0)+(isWarm&&sm0>=4?15:0));
-  const CDR_raw=Math.round(SMD[sm0].anger*0.30+SMD[sm0].negAffect*0.20+CD[c0].arousal/7*25+(isAngular&&isWarm?20:0)+(sm0===6?20:0));
-  const SIR=riskLevel(SIR_raw),SUR=riskLevel(SUR_raw),CDR=riskLevel(CDR_raw);
-  const SIR_indicators=[];
-  if(sh0>=6)SIR_indicators.push("Dark shade preference — elevated emotional burden indicator");
-  if(sm0>=5)SIR_indicators.push("Primary affect "+SMD[sm0].name+" — high negative valence");
-  if(isDarkCool)SIR_indicators.push("Dark-cool colour — social withdrawal indicator");
-  if(s0===2&&sm0>=4)SIR_indicators.push("Angular primary shape with negative affect — stress reactivity");
-  if(SIR_indicators.length===0)SIR_indicators.push("No significant visual indicators for elevated risk");
-  const SUR_indicators=[];
-  if(isWarm&&CD[c0].arousal>=6)SUR_indicators.push("High-arousal warm colour — sensation-seeking tendency");
-  if(isAngular&&sm0>=4)SUR_indicators.push("Angular shape with negative affect — impulsivity-distress pairing");
-  if(SD[sh0].mentalBurden>=60)SUR_indicators.push("Elevated emotional burden — risk of maladaptive coping");
-  if(SUR_indicators.length===0)SUR_indicators.push("No significant visual indicators for elevated risk");
-  const CDR_indicators=[];
-  if(sm0===6)CDR_indicators.push("Primary affect — Anger — high aggression indicator");
-  if(isAngular&&isWarm)CDR_indicators.push("Angular shape + warm colour — dominance-aggression pairing");
-  if(CD[c0].arousal>=6)CDR_indicators.push("High physiological arousal colour — low frustration tolerance");
-  if(CDR_indicators.length===0)CDR_indicators.push("No significant visual indicators for elevated risk");
-  const maxFlag=Math.max(SIR.flag,SUR.flag,CDR.flag);
-  const CRI=maxFlag===0?"Minimal":maxFlag===1?"Low — Monitor":maxFlag===2?"Moderate — Intervention Indicated":maxFlag===3?"Significant — Priority Referral":"Urgent — Immediate Evaluation Required";
-  const CRI_color=maxFlag<=1?"#16a34a":maxFlag===2?"#d97706":maxFlag===3?"#ea580c":"#dc2626";
-  const d5={SIR,SIR_raw,SIR_indicators,SUR,SUR_raw,SUR_indicators,CDR,CDR_raw,CDR_indicators,CRI,CRI_color,maxFlag};
-
-  const meta={shapeCode:sSeq.join(""),colorCode:cSeq.join(""),shadeCode:shSeq.join(""),smileyCode:smSeq.join(""),
-    firstShape:SHAPE_DATA[s0].name,firstColor:COLOR_DATA[c0].name,
-    firstShade:SHADE_DATA[sh0].label,firstSmiley:SMILEY_DATA[sm0].name};
-  return{d1,d2,d3,d4,d5,meta};
-}
-
-// SCSS SHAPES SVG
-function ShapeSCSS({code,fill="#1e40af",size=48}){
-  const s=size,c=s/2,r=s/2-2;
-  const poly=n=>Array.from({length:n},(_,i)=>{const a=(i*2*Math.PI/n)-Math.PI/2;return`${c+r*Math.cos(a)},${c+r*Math.sin(a)}`;}).join(" ");
-  return(<svg width={s} height={s} viewBox={`0 0 ${s} ${s}`} style={{display:"block"}}>
-    {code===1&&<circle cx={c} cy={c} r={r} fill={fill}/>}
-    {code===2&&<polygon points={poly(3)} fill={fill}/>}
-    {code===3&&<rect x={2} y={2} width={s-4} height={s-4} fill={fill}/>}
-    {code===4&&<polygon points={`${c},2 ${s-2},${c} ${c},${s-2} 2,${c}`} fill={fill}/>}
-    {code===5&&<polygon points={poly(5)} fill={fill}/>}
-    {code===6&&<polygon points={poly(6)} fill={fill}/>}
-    {code===7&&<polygon points={poly(8)} fill={fill}/>}
-  </svg>);}
-
-function generateShades(hex){try{const r=parseInt(hex.slice(1,3),16)/255,g=parseInt(hex.slice(3,5),16)/255,b=parseInt(hex.slice(5,7),16)/255;const max=Math.max(r,g,b),min=Math.min(r,g,b);let h=0,s=0;if(max!==min){const d=max-min;s=(max+min)>1?d/(2-max-min):d/(max+min);if(max===r)h=((g-b)/d+(g<b?6:0))/6;else if(max===g)h=((b-r)/d+2)/6;else h=((r-g)/d+4)/6;}const hd=Math.round(h*360),sp=Math.round(Math.max(s,0.5)*100);return[88,76,63,50,38,26,14].map((lp,i)=>({code:i+1,hex:`hsl(${hd},${sp}%,${lp}%)`}));}catch{return Array.from({length:7},(_,i)=>({code:i+1,hex:`hsl(0,0%,${88-11*i}%)`}));}}
-
-function StaticCircle({items,onSelect,renderItem}){
-  const[ready,setReady]=useState(false);
-  useEffect(()=>{const t=setTimeout(()=>setReady(true),80);return()=>clearTimeout(t);},[]);
-  const n=items.length;
-  const vw=typeof window!=="undefined"?Math.min(window.innerWidth,520):400;
-  const radius=Math.min(130,Math.max(90,vw*0.24));
-  const itemSize=Math.min(70,Math.max(54,radius*0.52));
-  const cs=radius*2+itemSize+10,cx=cs/2;
-  return(<div style={{position:"relative",width:cs,height:cs,maxWidth:"100%",margin:"0 auto",flexShrink:0}}>
-    <svg style={{position:"absolute",top:0,left:0,pointerEvents:"none"}} width={cs} height={cs}><circle cx={cx} cy={cx} r={radius} fill="none" stroke="rgba(30,64,175,0.12)" strokeWidth={1.5} strokeDasharray="5 5"/></svg>
-    {items.map((item,idx)=>{
-      const angle=(idx/n)*2*Math.PI-Math.PI/2;
-      const tx=cx+radius*Math.cos(angle)-itemSize/2,ty=cx+radius*Math.sin(angle)-itemSize/2;
-      return(<div key={item.code} onClick={()=>onSelect(item)} style={{position:"absolute",width:itemSize,height:itemSize,top:ready?ty:cx-itemSize/2,left:ready?tx:cx-itemSize/2,opacity:ready?1:0,transition:`top 0.5s cubic-bezier(0.34,1.4,0.64,1) ${idx*50}ms,left 0.5s cubic-bezier(0.34,1.4,0.64,1) ${idx*50}ms,opacity 0.3s ease ${idx*50}ms,transform 0.18s ease`,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",background:"white",borderRadius:"50%",boxShadow:"0 3px 14px rgba(0,0,0,0.1),0 0 0 1.5px rgba(30,64,175,0.15)",userSelect:"none",touchAction:"manipulation",zIndex:2}}
-        onMouseEnter={e=>{e.currentTarget.style.transform="scale(1.12)";e.currentTarget.style.boxShadow="0 6px 22px rgba(30,64,175,0.25),0 0 0 2.5px rgba(30,64,175,0.45)";}}
-        onMouseLeave={e=>{e.currentTarget.style.transform="scale(1)";e.currentTarget.style.boxShadow="0 3px 14px rgba(0,0,0,0.1),0 0 0 1.5px rgba(30,64,175,0.15)";}}
-      >{renderItem(item,Math.round(itemSize*0.55))}</div>);
-    })}
-  </div>);}
-
-function SelectionStage({stageKey,title,instr,items,renderItem,onComplete,accentColor}){
-  const[remaining,setRemaining]=useState([...items]);
-  const[selected,setSelected]=useState([]);
-  const ac=accentColor||"#1e40af";
-  const pick=item=>{
-    const ns=[...selected,item],nr=remaining.filter(i=>i.code!==item.code);
-    setSelected(ns);setRemaining(nr);
-    if(nr.length===0)setTimeout(()=>onComplete(ns.map(i=>i.code)),500);
-  };
-  return(<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:12,width:"100%"}}>
-    <div style={{textAlign:"center",padding:"0 8px"}}>
-      <div style={{display:"inline-block",fontSize:10,fontWeight:700,letterSpacing:"0.12em",textTransform:"uppercase",color:ac,background:`${ac}12`,borderRadius:100,padding:"4px 14px",marginBottom:6}}>{title}</div>
-      <div style={{fontSize:14,color:"#374151",fontWeight:500,lineHeight:1.5}}>{instr}</div>
-    </div>
-    <div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"center"}}>
-      {Array.from({length:7},(_,i)=>(<div key={i} style={{width:28,height:28,borderRadius:"50%",background:i<selected.length?ac:"rgba(30,64,175,0.05)",color:i<selected.length?"white":`${ac}70`,border:i<selected.length?`2px solid ${ac}`:`1.5px dashed ${ac}35`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,transition:"all 0.3s cubic-bezier(0.34,1.56,0.64,1)"}}>{i<selected.length?"✓":i+1}</div>))}
-    </div>
-    {remaining.length>0
-      ?<StaticCircle key={`${stageKey}-${remaining.length}`} items={remaining} onSelect={pick} renderItem={(item,sz)=>renderItem(item,sz)}/>
-      :<div style={{height:220,display:"flex",alignItems:"center",justifyContent:"center",fontSize:56}}>✅</div>
-    }
-    {selected.length>0&&(<div style={{width:"100%",maxWidth:400,background:"rgba(30,64,175,0.02)",borderRadius:12,padding:"10px 12px",border:"1px solid rgba(30,64,175,0.08)"}}>
-      <div style={{fontSize:9,fontWeight:700,color:ac,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:7}}>Selection order — Position 1 (most liked) → 7</div>
-      <div style={{display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>{selected.map((item,idx)=>(<div key={item.code} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:2}}><div style={{width:32,height:32,borderRadius:"50%",background:"white",border:`2px solid ${idx===0?ac:`${ac}28`}`,display:"flex",alignItems:"center",justifyContent:"center"}}>{renderItem(item,19)}</div><span style={{fontSize:8,color:"#9CA3AF",fontWeight:700}}>{idx+1}</span></div>))}</div>
-    </div>)}
-  </div>);}
-
-// ══════════════════════════════════════════════════════════════════════════════
-//  TIMER COMPONENT
-// ══════════════════════════════════════════════════════════════════════════════
-function Timer({ totalSecs, onTimeout, t }) {
-  const [remaining, setRemaining] = useState(totalSecs);
-  const ref = useRef(null);
-  useEffect(() => {
-    ref.current = setInterval(() => {
-      setRemaining(r => {
-        if (r <= 1) { clearInterval(ref.current); onTimeout(); return 0; }
-        return r - 1;
-      });
-    }, 1000);
-    return () => clearInterval(ref.current);
-  }, []);
-  const pct = (remaining / totalSecs) * 100;
-  const mins = Math.floor(remaining / 60);
-  const secs = remaining % 60;
-  const col = pct > 40 ? "#0d9488" : pct > 15 ? "#d97706" : "#dc2626";
-  return (
-    <div style={{display:"flex",alignItems:"center",gap:10}}>
-      <div style={{flex:1,height:6,background:"#f1f5f9",borderRadius:3,overflow:"hidden"}}>
-        <div style={{width:`${pct}%`,height:"100%",background:col,borderRadius:3,transition:"width 1s linear"}}/>
-      </div>
-      <span style={{fontSize:13,fontWeight:700,color:col,minWidth:42,textAlign:"right",fontFamily:"'Courier New',monospace"}}>
-        {mins}:{String(secs).padStart(2,"0")}
-      </span>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-//  FIG DISPLAY CELL
-// ══════════════════════════════════════════════════════════════════════════════
-function FigBox({ fig, size=52, selected=false, onClick=null, label=null }) {
-  const isMulti = fig && fig.figs;
-  const style = {
-    width:size, height:size, border:`${selected?"2.5px solid #0d5c6e":"1.5px solid #e2e8f0"}`,
-    borderRadius:8, background:selected?"#e0f2fe":"#fafafa",
-    display:"flex", alignItems:"center", justifyContent:"center",
-    cursor:onClick?"pointer":"default", transition:"all 0.15s", flexShrink:0,
-    boxShadow:selected?"0 0 0 3px #bae6fd":"none",
-  };
-  return (
-    <div style={style} onClick={onClick}
-      onMouseEnter={e=>{if(onClick){e.currentTarget.style.borderColor="#0d9488";e.currentTarget.style.background="#f0fdfa";}}}
-      onMouseLeave={e=>{if(onClick&&!selected){e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#fafafa";}}}>
-      {isMulti ? <MultiFig figs={fig.figs} dim={size-6}/> : fig ? <Fig {...fig} dim={size-6}/> : <span style={{fontSize:18,color:"#94a3b8",fontWeight:700}}>?</span>}
-      {label && <div style={{position:"absolute",bottom:-18,left:0,right:0,textAlign:"center",fontSize:11,color:"#64748b",fontWeight:600}}>{label}</div>}
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-//  SUBTEST RENDERERS
-// ══════════════════════════════════════════════════════════════════════════════
-function SeriesSubtest({ onComplete, t }) {
-  const [idx, setIdx] = useState(0);
-  const [answers, setAnswers] = useState({});
-  const [selected, setSelected] = useState(null);
-  const [confirmed, setConfirmed] = useState(false);
-  const item = SERIES[idx];
-  const { shuffled, newCorrect } = shuffleChoices(item.choices, item.ans, idx, "SER");
-
-  const confirm = (choiceIdx) => {
-    setSelected(choiceIdx);
-    setConfirmed(true);
-    setTimeout(() => {
-      const isCorrect = choiceIdx === newCorrect;
-      const newAns = {...answers, [idx]: isCorrect};
-      setAnswers(newAns);
-      setSelected(null); setConfirmed(false);
-      if (idx + 1 >= SERIES.length) { onComplete(newAns); }
-      else { setIdx(idx + 1); }
-    }, 500);
-  };
-
-  const skip = () => {
-    const newAns = {...answers, [idx]: false};
-    setAnswers(newAns);
-    if (idx + 1 >= SERIES.length) { onComplete(newAns); }
-    else { setIdx(idx + 1); }
-  };
-
-  return (
-    <div>
-      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-        <span style={{fontSize:12,color:"#64748b"}}>{idx+1} / {SERIES.length}</span>
-        <div style={{flex:1,height:3,background:"#f1f5f9",borderRadius:2,overflow:"hidden"}}>
-          <div style={{width:`${(idx/SERIES.length)*100}%`,height:"100%",background:"#0d9488"}}/>
-        </div>
-      </div>
-      <p style={{fontSize:13,color:"#374151",marginBottom:14,fontWeight:500}}>What comes next in the pattern?</p>
-      <div style={{display:"flex",alignItems:"center",gap:8,justifyContent:"center",marginBottom:20,flexWrap:"wrap"}}>
-        {item.seq.map((fig,i) => <FigBox key={i} fig={fig} size={54}/>)}
-        <div style={{width:54,height:54,border:"2px dashed #0d9488",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:"#f0fdfa"}}>
-          <span style={{fontSize:20,color:"#0d9488",fontWeight:800}}>?</span>
-        </div>
-      </div>
-      <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
-        {shuffled.map((fig,i) => (
-          <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-            <FigBox fig={fig} size={54} selected={selected===i} onClick={() => !confirmed && confirm(i)}/>
-            <span style={{fontSize:12,fontWeight:700,color:selected===i?"#0d5c6e":"#94a3b8"}}>{i+1}</span>
-          </div>
-        ))}
-      </div>
-      <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}>
-        <button onClick={skip} style={{padding:"6px 14px",borderRadius:7,background:"#f1f5f9",color:"#64748b",border:"none",fontSize:12,cursor:"pointer"}}>{t.skip}</button>
-      </div>
-    </div>
-  );
-}
-
-function ClassifSubtest({ onComplete, t }) {
-  const [idx, setIdx] = useState(0);
-  const [answers, setAnswers] = useState({});
-  const [selected, setSelected] = useState(null);
-  const item = CLASSIF[idx];
-
-  const { shuffled: shuffledFigs, newCorrect: newCls } = shuffleChoices(item.figs, item.ans, idx, "CLS");
-
-  const confirm = (choiceIdx) => {
-    setSelected(choiceIdx);
-    setTimeout(() => {
-      const isCorrect = choiceIdx === newCls;
-      const newAns = {...answers, [idx]: isCorrect};
-      setAnswers(newAns);
-      setSelected(null);
-      if (idx + 1 >= CLASSIF.length) { onComplete(newAns); }
-      else { setIdx(idx + 1); }
-    }, 500);
-  };
-
-  return (
-    <div>
-      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-        <span style={{fontSize:12,color:"#64748b"}}>{idx+1} / {CLASSIF.length}</span>
-        <div style={{flex:1,height:3,background:"#f1f5f9",borderRadius:2,overflow:"hidden"}}>
-          <div style={{width:`${(idx/CLASSIF.length)*100}%`,height:"100%",background:"#7c3aed"}}/>
-        </div>
-      </div>
-      <p style={{fontSize:13,color:"#374151",marginBottom:14,fontWeight:500}}>Which one is different from the others?</p>
-      <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
-        {shuffledFigs.map((fig,i) => (
-          <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-            <FigBox fig={fig} size={58} selected={selected===i} onClick={() => selected===null && confirm(i)}/>
-            <span style={{fontSize:12,fontWeight:700,color:selected===i?"#7c3aed":"#94a3b8"}}>{i+1}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function MatrixSubtest({ onComplete, t }) {
-  const [idx, setIdx] = useState(0);
-  const [answers, setAnswers] = useState({});
-  const [selected, setSelected] = useState(null);
-  const item = MATRICES[idx];
-  const cellSz = 50;
-
-  const confirm = (choiceIdx) => {
-    setSelected(choiceIdx);
-    setTimeout(() => {
-      const newAns = {...answers, [idx]: choiceIdx};
-      setAnswers(newAns);
-      setSelected(null);
-      if (idx + 1 >= MATRICES.length) { onComplete(newAns); }
-      else { setIdx(idx + 1); }
-    }, 500);
-  };
-
-  return (
-    <div>
-      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-        <span style={{fontSize:12,color:"#64748b"}}>{idx+1} / {MATRICES.length}</span>
-        <div style={{flex:1,height:3,background:"#f1f5f9",borderRadius:2,overflow:"hidden"}}>
-          <div style={{width:`${(idx/MATRICES.length)*100}%`,height:"100%",background:"#1d4ed8"}}/>
-        </div>
-      </div>
-      <p style={{fontSize:13,color:"#374151",marginBottom:14,fontWeight:500}}>Which picture completes the grid?</p>
-      {/* 3×3 grid */}
-      <div style={{display:"inline-grid",gridTemplateColumns:`repeat(3,${cellSz}px)`,gap:3,border:"2px solid #1d4ed8",borderRadius:8,padding:4,marginBottom:16,background:"#eff6ff"}}>
-        {item.rows.flatMap((row, ri) => row.map((cell, ci) =>
-          cell ? <FigBox key={`${ri}-${ci}`} fig={cell} size={cellSz}/>
-               : <div key={`${ri}-${ci}`} style={{width:cellSz,height:cellSz,border:"2px dashed #1d4ed8",borderRadius:6,display:"flex",alignItems:"center",justifyContent:"center",background:"white"}}>
-                   <span style={{fontSize:18,color:"#1d4ed8",fontWeight:800}}>?</span>
-                 </div>
-        ))}
-      </div>
-      {/* Choices */}
-      {(() => {
-        const { shuffled: matSh, newCorrect: matCor } = shuffleChoices(item.choices, item.ans, idx, "MAT");
-        return <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
-          {matSh.map((fig,i) => (
-            <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-              <FigBox fig={fig} size={52} selected={selected===i} onClick={() => selected===null && (()=>{setSelected(i);setTimeout(()=>{const newAns={...answers,[idx]:i===matCor};setAnswers(newAns);setSelected(null);if(idx+1>=MATRICES.length){onComplete(newAns);}else{setIdx(idx+1);}},500);})()}/>
-              <span style={{fontSize:12,fontWeight:700,color:selected===i?"#1d4ed8":"#94a3b8"}}>{i+1}</span>
-            </div>
-          ))}
-        </div>;
-      })()}
-    </div>
-  );
-}
-
-function CondSubtest({ onComplete, t }) {
-  const [idx, setIdx] = useState(0);
-  const [answers, setAnswers] = useState({});
-  const [selected, setSelected] = useState(null);
-  const item = CONDITIONS[idx];
-  const cellSz = 56;
-
-  const confirm = (choiceIdx) => {
-    setSelected(choiceIdx);
-    setTimeout(() => {
-      const newAns = {...answers, [idx]: choiceIdx};
-      setAnswers(newAns);
-      setSelected(null);
-      if (idx + 1 >= CONDITIONS.length) { onComplete(newAns); }
-      else { setIdx(idx + 1); }
-    }, 500);
-  };
-
-  return (
-    <div>
-      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-        <span style={{fontSize:12,color:"#64748b"}}>{idx+1} / {CONDITIONS.length}</span>
-        <div style={{flex:1,height:3,background:"#f1f5f9",borderRadius:2,overflow:"hidden"}}>
-          <div style={{width:`${(idx/CONDITIONS.length)*100}%`,height:"100%",background:"#0891b2"}}/>
-        </div>
-      </div>
-      <p style={{fontSize:13,color:"#374151",marginBottom:10,fontWeight:500}}>Which choice follows the same rule as the example?</p>
-      {/* Reference */}
-      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
-        <div style={{border:"2px solid #0891b2",borderRadius:8,padding:4,background:"#ecfeff"}}>
-          <CondFig shape={item.ref.shape} dot={item.ref.dot} dim={cellSz}/>
-        </div>
-        <span style={{fontSize:22,color:"#94a3b8",fontWeight:700}}>→</span>
-        <span style={{fontSize:12,color:"#64748b"}}>Choose the one that shows the same dot rule</span>
-      </div>
-      {/* Choices */}
-      {(() => {
-        const { shuffled: condSh, newCorrect: condCor } = shuffleChoices(item.choices, item.ans, idx, "CON");
-        return <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
-          {condSh.map((c,i) => (
-            <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-              <div style={{width:cellSz,height:cellSz,border:`${selected===i?"2.5px solid #0891b2":"1.5px solid #e2e8f0"}`,borderRadius:8,background:selected===i?"#ecfeff":"#fafafa",display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",transition:"all 0.15s",boxShadow:selected===i?"0 0 0 3px #a5f3fc":"none"}} onClick={() => selected===null && (()=>{setSelected(i);setTimeout(()=>{const newAns={...answers,[idx]:i===condCor};setAnswers(newAns);setSelected(null);if(idx+1>=CONDITIONS.length){onComplete(newAns);}else{setIdx(idx+1);}},500);})()}>
-                <CondFig shape={c.shape} dot={c.dot} dim={cellSz-6}/>
-              </div>
-              <span style={{fontSize:12,fontWeight:700,color:selected===i?"#0891b2":"#94a3b8"}}>{i+1}</span>
-            </div>
-          ))}
-        </div>;
-      })()}
-    </div>
-  );
-}
-
-// Score a subtest's answers against correct answers
-
-// ── Deterministic option shuffle — different position per question ───────────
-// Uses question index + subtest name as seed so it is stable across renders
-// The correct answer follows the shuffled position, scoring is recalculated
-function shuffleChoices(choices, correctAns, questionIdx, subtestId) {
-  const seed = (questionIdx + 1) * 31 + subtestId.charCodeAt(0) * 7;
-  const rng = (n) => { const x = Math.sin(seed + n) * 43758; return x - Math.floor(x); };
-  const arr = choices.map((ch, i) => ({ ch, origIdx: i }));
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(rng(i) * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  const newCorrect = arr.findIndex(a => a.origIdx === correctAns);
-  return { shuffled: arr.map(a => a.ch), newCorrect };
-}
-
-// scoreSubtest now receives {idx: isCorrect} boolean map
-function scoreSubtest(answers, items) {
-  return Object.values(answers).filter(v => v === true).length;
-}
-
-
-
-// ══════════════════════════════════════════════════════════════════════════════
-//  CLAUDE API — COMBINED NARRATIVE GENERATOR
-// ══════════════════════════════════════════════════════════════════════════════
-async function generateNarrative(fisResult, scss, childInfo) {
-  // Fallback narrative — always used if API unavailable (standalone deployment)
-  const fallback = {
-    cog_summary:`${childInfo.name||"The child"} completed the CIBS Fluid Intelligence Scale. The estimated IQ is ${fisResult.iq}, placing them at the ${fisResult.pct}th percentile for their age. Mental age is approximately ${fisResult.ma} years. ${fisResult.edu}`,
-    cog_clinical:`CIBS-FIS Score: IQ ${fisResult.iq} | MA ${fisResult.ma} yrs | ${fisResult.pct}th percentile | Band: ${fisResult.band} | Scale ${fisResult.scale}. Subtests: SER ${fisResult.ser||0}, CLS ${fisResult.cls||0}, MAT ${fisResult.mat||0}, CON ${fisResult.con||0}. Norms: Cattell (1949, 1973).`,
-    scss_summary:`The SCSS profile reveals a ${scss.d2.dsmCluster} personality style with ${scss.d3.eqBand?.band||"average"} emotional intelligence (EQ ${scss.d3.EQSS}). The child demonstrates ${scss.d1.primaryStyle} cognitive style. Mental health indicators are within ${scss.d4.MHI>=60?"normal":"monitored"} range.`,
-    scss_clinical:`SCSS-CQ: ${scss.d1.CQ} (${scss.d1.primaryStyle}). EQ-SS: ${scss.d3.EQSS} | ESI: ${scss.d3.ESI}/100. MHI: ${scss.d4.MHI}/100 (${scss.d4.phqAnalog?.level||"—"}). Risk: ${scss.d5?.CRI||"Low"}. DSM cluster: ${scss.d2.dsmCluster}.`,
-    combined:`Combined cognitive and personality profile suggests ${fisResult.band} intellectual functioning with ${scss.d2.dsmCluster} interpersonal style. Emotional regulation index (ESI ${scss.d3.ESI}/100) and cognitive performance are consistent with developmental expectations for age ${childInfo.age||"—"}.`,
-    recommendations:`1. Share this report with the class teacher and school counsellor for educational planning.
-2. Re-assess cognitive function in 12 months or sooner if academic concerns arise.
-3. ${fisResult.iq<85?"Consider referral to educational psychologist for detailed evaluation.":"Continue to encourage strengths identified in this assessment."}
-4. Monitor emotional wellbeing; ensure the child has trusted adults to speak with.
-5. Parents are encouraged to attend a CIBS feedback session for detailed interpretation.`
+// ════════════════════════════════════════════════════════════════
+// BAR CHART
+// ════════════════════════════════════════════════════════════════
+// ── CIBS DATABANK SUBMISSION ────────────────────────────────────────────────
+function submitToDatabank_P(ci, ageInfo, p, bx, S, RL, SF, sm) {
+  if (!ci.fileNo) return false;
+  const data = {
+    source: "eSMART-P",
+    fileNo: ci.fileNo,
+    timestamp: new Date().toISOString(),
+    childInfo: ci,
+    ageGroup: ageInfo.group,
+    ageYrs: ageInfo.age,
+    perinatal: p,
+    behaviourItems: bx,
+    domainScores: Object.fromEntries(
+      Object.entries(S).map(([d,v])=>[d,{total:v.total,sev:v.sev,pct:v.pct}])
+    ),
+    riskLevel: { tag:RL.tag, lv:RL.lv, label:RL.label },
+    suicideFlag: SF,
+    safetyModule: sm,
   };
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(()=>controller.abort(), 8000);
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method:"POST", signal:controller.signal,
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1200,messages:[{role:"user",content:`Write a JSON clinical report for a child named ${childInfo.name||"Subject"}, IQ ${fisResult.iq}, MA ${fisResult.ma} yrs, SCSS EQ ${scss.d3.EQSS}. Keys: cog_summary, cog_clinical, scss_summary, scss_clinical, combined, recommendations. Pure JSON only.`}]})
-    });
-    clearTimeout(timer);
-    const data = await res.json();
-    const txt = (data.content||[]).map(b=>b.text||"").join("");
-    const clean = txt.replace(/```json|```/g,"").trim();
-    const parsed = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}")+1));
-    return { ...fallback, ...parsed };
-  } catch(e) {
-    return fallback;
+    localStorage.setItem(`CIBS_PENDING_P_${ci.fileNo}`, JSON.stringify(data));
+    return true;
+  } catch(e) { return false; }
+}
+
+
+function BarChart({s,t}) {
+  const doms=Object.entries(DCFG), W=680,H=310,PL=44,PB=62,PT=28,PR=16;
+  const cW=W-PL-PR, cH=H-PT-PB, bW=Math.floor(cW/doms.length)-10, gap=Math.floor(cW/doms.length);
+  const sevCol={Normal:"#86efac",Mild:"#fde047",Moderate:"#fb923c",Severe:"#f87171"};
+  return (
+    <div style={{overflowX:"auto"}}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",maxWidth:W,display:"block"}}>
+        {[0,25,50,75,100].map(pct=>{const y=PT+cH-(pct/100)*cH; return <g key={pct}><line x1={PL} y1={y} x2={PL+cW} y2={y} stroke="#f1f5f9" strokeWidth={1}/><text x={PL-4} y={y+4} fontSize={10} textAnchor="end" fill="#94a3b8">{pct}%</text></g>;})}
+        <line x1={PL} y1={PT+cH-(4/100)*cH} x2={PL+cW} y2={PT+cH-(4/100)*cH} stroke="#16a34a" strokeWidth={2} strokeDasharray="6 4"/>
+        <text x={PL+cW+4} y={PT+cH-(4/100)*cH+4} fontSize={9} fill="#16a34a">NM</text>
+        {doms.map(([d,c],i)=>{
+          const sc=s[d]; const bH=(sc.pct/100)*cH; const x=PL+i*gap+(gap-bW)/2; const y=PT+cH-bH;
+          const arY=PT+cH-(sc.atRiskPct/100)*cH; const prY=PT+cH-(sc.probPct/100)*cH;
+          return <g key={d}>
+            <line x1={x} y1={arY} x2={x+bW} y2={arY} stroke="#fbbf24" strokeWidth={1} strokeDasharray="3 2"/>
+            <line x1={x} y1={prY} x2={x+bW} y2={prY} stroke="#f97316" strokeWidth={1.5} strokeDasharray="3 2"/>
+            <rect x={x} y={Math.min(y,PT+cH-2)} width={bW} height={Math.max(bH,2)} rx={4} fill={c.color} opacity={0.82}/>
+            <rect x={x} y={PT+cH} width={bW} height={6} rx={2} fill={sevCol[sc.sev]}/>
+            {sc.pct>8 && <text x={x+bW/2} y={y-5} fontSize={10} textAnchor="middle" fill={c.color} fontWeight="700">{sc.pct}%</text>}
+            <text x={x+bW/2} y={PT+cH+20} fontSize={11} textAnchor="middle" fill="#374151" fontWeight="700">{d}</text>
+            <text x={x+bW/2} y={PT+cH+34} fontSize={8} textAnchor="middle" fill="#6b7280">{sc.sev}</text>
+          </g>;
+        })}
+        <line x1={PL} y1={PT} x2={PL} y2={PT+cH} stroke="#cbd5e1" strokeWidth={1.5}/>
+        <line x1={PL} y1={PT+cH} x2={PL+cW} y2={PT+cH} stroke="#cbd5e1" strokeWidth={1.5}/>
+        {[{l:t.normalMedian,c:"#16a34a",d:"6 4"},{l:t.atRiskLine,c:"#fbbf24",d:"3 2"},{l:t.probableLine,c:"#f97316",d:"3 2"}].map((leg,i)=>(
+          <g key={leg.l} transform={`translate(${PL+i*170},${H-12})`}><line x1={0} y1={-4} x2={20} y2={-4} stroke={leg.c} strokeWidth={1.5} strokeDasharray={leg.d}/><text x={24} y={0} fontSize={9} fill="#6b7280">{leg.l}</text></g>
+        ))}
+        {[{l:"Normal",c:"#86efac"},{l:"Mild",c:"#fde047"},{l:"Moderate",c:"#fb923c"},{l:"Severe",c:"#f87171"}].map((sv,i)=>(
+          <g key={sv.l} transform={`translate(${PL+i*95},${H-28})`}><rect x={0} y={-8} width={12} height={8} rx={2} fill={sv.c}/><text x={16} y={0} fontSize={9} fill="#6b7280">{sv.l}</text></g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+// PROGRESS BAR
+// ════════════════════════════════════════════════════════════════
+function PBar({step,steps}) {
+  return (
+    <div style={{padding:"0 24px 24px"}}>
+      <div style={{display:"flex",alignItems:"center"}}>
+        {steps.map((lbl,i)=>{
+          const n=i+1,done=step>n,active=step===n;
+          return <div key={i} style={{display:"flex",alignItems:"center",flex:i<steps.length-1?1:"none"}}>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+              <div style={{width:30,height:30,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",background:done?"#0d9488":active?"#fff":"rgba(255,255,255,0.12)",border:active?"2px solid #fff":done?"none":"2px solid rgba(255,255,255,0.25)",color:done?"#fff":active?"#0d5c6e":"rgba(255,255,255,0.45)",fontWeight:700,fontSize:12}}>
+                {done?"✓":n}
+              </div>
+              <span style={{fontSize:9,color:active?"#fff":done?"rgba(255,255,255,0.8)":"rgba(255,255,255,0.35)",fontWeight:active?700:400,whiteSpace:"nowrap"}}>{lbl}</span>
+            </div>
+            {i<steps.length-1&&<div style={{flex:1,height:2,background:done?"#0d9488":"rgba(255,255,255,0.18)",margin:"0 6px",marginBottom:20}}/>}
+          </div>;
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+// MAIN APP
+// ════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
+// INSTRUCTION LETTERS — per role, per language
+// Role: "informant" (parent/caregiver) | "clinician"
+// ════════════════════════════════════════════════════════════════
+const LETTERS = {
+  informant: {
+    en: {
+      heading: "Dear Parent / Caregiver",
+      from:    "Dr. Shailesh Pangaonkar, Director and Consultant Psychiatrist\nCentral Institute of Behavioural Sciences (CIBS), Nagpur",
+      body: [
+        "Thank you for taking the time to fill in this questionnaire. Your honest responses will help us understand your child better and identify any areas where additional support may be beneficial.",
+        "eSMART-P is a carefully developed screening questionnaire for children aged 3 to 18 years. It consists of a short set of questions about your child's development, behaviour, emotions, and daily functioning. The questions are based on internationally recognised criteria (DSM-5 and ICD-11) and have been validated on thousands of children in Central India.",
+        "This questionnaire is NOT a diagnosis. It is a screening tool — like a thermometer that tells you there may be a fever, not what the illness is. The results will be reviewed by a trained clinician who will discuss the findings with you.",
+        "Please answer every question as honestly as possible based on what you have observed over the past 6 months. If a question does not apply, you may mark 'Not True'. There are no right or wrong answers.",
+        "All information you provide is strictly confidential and will be used only for the purpose of supporting your child's wellbeing.",
+      ],
+      closing: "With warm regards and best wishes for your child's health.",
+    },
+    hi: {
+      heading: "प्रिय माता-पिता / देखभालकर्ता",
+      from:    "डॉ. शैलेश पानगावकर, निदेशक एवं परामर्शी मनोचिकित्सक\nकेंद्रीय व्यावहारिक विज्ञान संस्थान (CIBS), नागपुर",
+      body: [
+        "इस प्रश्नावली को भरने का समय निकालने के लिए आपका हृदय से धन्यवाद। आपके ईमानदार उत्तर हमें आपके बच्चे को बेहतर समझने और उन क्षेत्रों की पहचान करने में मदद करेंगे जहाँ अतिरिक्त सहायता की आवश्यकता हो सकती है।",
+        "eSMART-P 3 से 18 वर्ष की आयु के बच्चों के लिए एक सावधानीपूर्वक विकसित जांच प्रश्नावली है। इसमें आपके बच्चे के विकास, व्यवहार, भावनाओं और दैनिक कार्यप्रणाली के बारे में प्रश्नों का एक छोटा समूह शामिल है। ये प्रश्न अंतरराष्ट्रीय स्तर पर मान्यता प्राप्त मानदंडों (DSM-5 और ICD-11) पर आधारित हैं।",
+        "यह प्रश्नावली कोई निदान (Diagnosis) नहीं है। यह एक जांच उपकरण है — जैसे थर्मामीटर बुखार की संभावना बताता है, बीमारी का नाम नहीं। परिणामों की समीक्षा एक प्रशिक्षित चिकित्सक करेंगे।",
+        "कृपया पिछले 6 महीनों में आपने जो देखा है उसके आधार पर हर सवाल का ईमानदारी से जवाब दें। यदि कोई प्रश्न लागू नहीं होता, तो 'सच नहीं' चुनें। सही या गलत उत्तर जैसा कुछ नहीं है।",
+        "आपके द्वारा प्रदान की गई सभी जानकारी पूर्णतः गोपनीय है।",
+      ],
+      closing: "आपके बच्चे के स्वास्थ्य के लिए शुभकामनाओं सहित।",
+    },
+    mr: {
+      heading: "प्रिय पालक / काळजीवाहू",
+      from:    "डॉ. शैलेश पानगावकर, संचालक व सल्लागार मनोचिकित्सक\nकेंद्रीय वर्तणूक विज्ञान संस्था (CIBS), नागपूर",
+      body: [
+        "ही प्रश्नावली भरण्यासाठी वेळ काढल्याबद्दल आपले मनःपूर्वक आभार. आपल्या प्रामाणिक उत्तरांमुळे आम्हाला आपल्या मुलाला अधिक चांगल्या प्रकारे समजून घेण्यास आणि अतिरिक्त मदतीची आवश्यकता असलेल्या क्षेत्रांची ओळख करण्यात मदत होईल.",
+        "eSMART-P ही 3 ते 18 वर्षे वयाच्या मुलांसाठी काळजीपूर्वक विकसित केलेली तपासणी प्रश्नावली आहे. यात आपल्या मुलाच्या विकास, वर्तन, भावना आणि दैनंदिन कार्यक्षमतेबद्दल प्रश्न आहेत. हे प्रश्न आंतरराष्ट्रीय निकषांवर (DSM-5 आणि ICD-11) आधारित आहेत.",
+        "ही प्रश्नावली म्हणजे निदान नव्हे. हे तपासणी साधन आहे — जसे थर्मामीटर ताप आहे का ते सांगतो, आजार काय आहे ते नाही. निकालांचा आढावा प्रशिक्षित वैद्यकांद्वारे घेतला जाईल.",
+        "कृपया गेल्या 6 महिन्यांत आपण जे पाहिले त्यावर आधारित प्रत्येक प्रश्नाचे प्रामाणिकपणे उत्तर द्या. प्रश्न लागू नसल्यास 'खरे नाही' निवडा. बरोबर किंवा चुकीची उत्तरे नाहीत.",
+        "आपण दिलेली सर्व माहिती पूर्णपणे गोपनीय राहील.",
+      ],
+      closing: "आपल्या मुलाच्या आरोग्यासाठी शुभेच्छांसह.",
+    },
+  },
+  clinician: {
+    en: {
+      heading: "Dear Clinician / Researcher / School Counsellor",
+      from:    "Dr. Shailesh Pangaonkar, Director and Consultant Psychiatrist\nCentral Institute of Behavioural Sciences (CIBS), Nagpur",
+      body: [
+        "Welcome to eSMART-P — the Parent/Caregiver Module of the CIBS Integrated Assessment Platform. This tool is designed for use in clinical, school, and community settings to facilitate early identification of neurodevelopmental, emotional, and behavioural difficulties in children and adolescents aged 3–18 years.",
+        "The questionnaire employs a validated 26-item short form (item selection based on ROC analysis, AUC > 0.65, Cronbach's α = 0.78–0.91) covering eight diagnostic domains: Intellectual Developmental Disorder (IDD), ADHD, Autism Spectrum Disorder (ASD), Specific Learning Disorder (SLD), Major Depressive Disorder (MDD), Anxiety Disorders (ANX), Oppositional Defiant Disorder (ODD), and Conduct Disorder (CD).",
+        "Domain thresholds are evidence-based, derived from a normative sample of N=55 and a clinical sample of N=281 from CIBS Nagpur. Severity classification (Normal / Mild / Moderate / Severe) is based on normal 90th percentile and clinical 75th percentile cut-points. The Suicide/Self-Harm risk flag requires concurrent ADHD (Mild+) + MDD (Moderate+, ≥4) + ODD or CD (Moderate/Severe).",
+        "Questions are automatically age-stratified into four groups (Pre-school <6, Primary 6–10, Secondary 11–15, Higher Secondary 16–18) to ensure developmental appropriateness without compromising psychometric properties.",
+        "IMPORTANT: This is a SCREENING TOOL, not a diagnostic instrument. All risk flags must be followed up with a full clinical interview, collateral information, and standardised assessment. The tool supports — but does not replace — clinical judgement.",
+        "All data submitted through this platform is stored securely in the CIBS research database and may contribute to ongoing standardisation, validation, and research publications.",
+      ],
+      closing: "Thank you for your contribution to evidence-based child mental health care in India.",
+    },
+    hi: {
+      heading: "प्रिय चिकित्सक / शोधकर्ता / स्कूल परामर्शदाता",
+      from:    "डॉ. शैलेश पानगावकर, निदेशक एवं परामर्शी मनोचिकित्सक\nकेंद्रीय व्यावहारिक विज्ञान संस्थान (CIBS), नागपुर",
+      body: [
+        "eSMART-P में आपका स्वागत है — CIBS एकीकृत मूल्यांकन मंच का माता-पिता/देखभालकर्ता मॉड्यूल। यह उपकरण 3–18 वर्ष के बच्चों और किशोरों में न्यूरोडेवलपमेंटल, भावनात्मक और व्यवहार संबंधी कठिनाइयों की प्रारंभिक पहचान के लिए डिज़ाइन किया गया है।",
+        "प्रश्नावली एक मान्य 26-आइटम संक्षिप्त फॉर्म का उपयोग करती है (ROC विश्लेषण, AUC > 0.65, Cronbach's α = 0.78–0.91) जो आठ नैदानिक क्षेत्रों को कवर करती है: IDD, ADHD, ASD, SLD, MDD, ANX, ODD और CD।",
+        "डोमेन थ्रेशोल्ड साक्ष्य-आधारित हैं, CIBS नागपुर के N=55 के सामान्य और N=281 के नैदानिक नमूने से प्राप्त किए गए हैं। गंभीरता वर्गीकरण (सामान्य/हल्का/मध्यम/गंभीर) 90वें प्रतिशत सामान्य और 75वें प्रतिशत नैदानिक कट-पॉइंट पर आधारित है।",
+        "महत्वपूर्ण: यह एक जांच उपकरण है, नैदानिक उपकरण नहीं। सभी जोखिम संकेतों के बाद पूर्ण नैदानिक साक्षात्कार आवश्यक है।",
+      ],
+      closing: "भारत में साक्ष्य-आधारित बाल मानसिक स्वास्थ्य देखभाल में आपके योगदान के लिए धन्यवाद।",
+    },
+    mr: {
+      heading: "प्रिय वैद्य / संशोधक / शाळा समुपदेशक",
+      from:    "डॉ. शैलेश पानगावकर, संचालक व सल्लागार मनोचिकित्सक\nकेंद्रीय वर्तणूक विज्ञान संस्था (CIBS), नागपूर",
+      body: [
+        "eSMART-P मध्ये आपले स्वागत आहे — CIBS एकीकृत मूल्यांकन व्यासपीठाचे पालक/काळजीवाहू मॉड्यूल. हे साधन 3–18 वर्षे वयाच्या मुलांमध्ये न्यूरोडेव्हलपमेंटल, भावनिक आणि वर्तणुकीशी संबंधित अडचणींची लवकर ओळख करण्यासाठी डिझाइन केले आहे.",
+        "प्रश्नावली एक प्रमाणित 26-आयटम संक्षिप्त फॉर्म वापरते (ROC विश्लेषण, AUC > 0.65, Cronbach's α = 0.78–0.91) जी आठ निदान क्षेत्रांचा समावेश करते: IDD, ADHD, ASD, SLD, MDD, ANX, ODD आणि CD.",
+        "डोमेन उंबरठे पुरावा-आधारित आहेत, CIBS नागपूरच्या N=55 सामान्य आणि N=281 नैदानिक नमुन्यांमधून प्राप्त केले आहेत. तीव्रता वर्गीकरण (सामान्य/सौम्य/मध्यम/तीव्र) 90व्या सामान्य आणि 75व्या नैदानिक शतमान आधारावर आहे.",
+        "महत्त्वाचे: हे तपासणी साधन आहे, निदान साधन नाही. सर्व जोखीम संकेतांनंतर पूर्ण नैदानिक मुलाखत आवश्यक आहे.",
+      ],
+      closing: "भारतातील पुरावा-आधारित बालमानसिक आरोग्य सेवेतील आपल्या योगदानाबद्दल आभार.",
+    },
+  },
+};
+
+const DISCLAIMER_TEXT = {
+  en: {
+    title: "Important Notice — Screening Tool Disclaimer",
+    points: [
+      "eSMART-P is a SCREENING TOOL designed to identify the probability of problems and risks in a child or adolescent. It is NOT a diagnostic instrument.",
+      "Results from this tool suggest areas that may warrant further clinical investigation. They do not constitute a clinical diagnosis under DSM-5 or ICD-11.",
+      "All risk flags generated by this tool — including the Suicide/Self-Harm flag — must be followed up with a full clinical interview by a qualified mental health professional.",
+      "This tool supports therapists, counsellors, and clinicians in their decision-making. It does not replace professional clinical judgement.",
+      "Data collected through this platform is stored securely and used solely for the purpose of supporting the subject's wellbeing and for research at CIBS, in accordance with ICMR ethical guidelines.",
+      "By proceeding, you confirm that you have read and understood this notice.",
+    ],
+    agree: "I have read and understood the above. I wish to proceed.",
+    proceed: "Proceed to Questionnaire →",
+  },
+  hi: {
+    title: "महत्वपूर्ण सूचना — जांच उपकरण अस्वीकरण",
+    points: [
+      "eSMART-P एक जांच उपकरण है जो किसी बच्चे या किशोर में समस्याओं और जोखिमों की संभावना की पहचान करने के लिए डिज़ाइन किया गया है। यह कोई नैदानिक उपकरण (Diagnostic Tool) नहीं है।",
+      "इस उपकरण के परिणाम उन क्षेत्रों का सुझाव देते हैं जिन पर आगे नैदानिक जांच की आवश्यकता हो सकती है। ये DSM-5 या ICD-11 के तहत कोई नैदानिक निदान नहीं हैं।",
+      "इस उपकरण द्वारा उत्पन्न सभी जोखिम संकेतों — जिसमें आत्मघात/स्वयं-हानि संकेत भी शामिल है — के बाद एक योग्य मानसिक स्वास्थ्य पेशेवर द्वारा पूर्ण नैदानिक साक्षात्कार आवश्यक है।",
+      "यह उपकरण चिकित्सकों के निर्णय में सहायता करता है। यह पेशेवर नैदानिक निर्णय का स्थान नहीं लेता।",
+      "आगे बढ़कर आप पुष्टि करते हैं कि आपने यह सूचना पढ़ और समझ ली है।",
+    ],
+    agree: "मैंने उपरोक्त पढ़ और समझ लिया है। मैं आगे बढ़ना चाहता/चाहती हूँ।",
+    proceed: "प्रश्नावली की ओर आगे बढ़ें →",
+  },
+  mr: {
+    title: "महत्त्वाची सूचना — तपासणी साधन अस्वीकरण",
+    points: [
+      "eSMART-P हे एक तपासणी साधन आहे जे मुल किंवा किशोरवयीन व्यक्तीतील समस्या आणि जोखमींची शक्यता ओळखण्यासाठी डिझाइन केले आहे. हे निदान साधन (Diagnostic Tool) नाही.",
+      "या साधनाचे निकाल अशा क्षेत्रांची सूचना देतात ज्यांना पुढील नैदानिक तपासणीची आवश्यकता असू शकते. हे DSM-5 किंवा ICD-11 अंतर्गत नैदानिक निदान नाही.",
+      "या साधनाद्वारे निर्माण होणाऱ्या सर्व जोखीम संकेतांनंतर — आत्मघात/स्वयं-हानी संकेतासह — पात्र मानसिक आरोग्य व्यावसायिकाद्वारे पूर्ण नैदानिक मुलाखत आवश्यक आहे.",
+      "हे साधन वैद्यांच्या निर्णयात मदत करते. हे व्यावसायिक नैदानिक निर्णयाची जागा घेत नाही.",
+      "पुढे जाऊन आपण पुष्टी करतो की आपण ही सूचना वाचली आणि समजली आहे.",
+    ],
+    agree: "मी वरील वाचले आणि समजले आहे. मला पुढे जायचे आहे.",
+    proceed: "प्रश्नावलीकडे पुढे जा →",
+  },
+};
+
+// ════════════════════════════════════════════════════════════════
+// SHARE UTILITIES
+// ════════════════════════════════════════════════════════════════
+function shareVia(method, childName, lang) {
+  const url  = window.location.href.split("?")[0];
+  const msgs = {
+    en: `CIBS eSMART-P — Child Behavioural Screening${childName ? " for " + childName : ""}.\nPlease open this link to fill in the questionnaire:\n${url}`,
+    hi: `CIBS eSMART-P — बाल व्यवहार जांच${childName ? " — " + childName : ""}।\nकृपया प्रश्नावली भरने के लिए यह लिंक खोलें:\n${url}`,
+    mr: `CIBS eSMART-P — बालक वर्तन तपासणी${childName ? " — " + childName : ""}.\nकृपया प्रश्नावली भरण्यासाठी हा दुवा उघडा:\n${url}`,
+  };
+  const msg = msgs[lang] || msgs.en;
+  const enc = encodeURIComponent(msg);
+  if (method === "whatsapp") window.open(`https://wa.me/?text=${enc}`, "_blank");
+  if (method === "email")    window.open(`mailto:?subject=eSMART-P Questionnaire&body=${enc}`, "_blank");
+  if (method === "sms")      window.open(`sms:?body=${enc}`, "_blank");
+  if (method === "copy") {
+    navigator.clipboard.writeText(`${msg}`).then(() => alert("Link and message copied to clipboard!")).catch(() => alert("Please copy manually: " + url));
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  COMBINED REPORT
-// ══════════════════════════════════════════════════════════════════════════════
-function CombinedReport({ fisResult, scss, narrative, childInfo, t, onNew }) {
-  const today = new Date().toLocaleDateString("en-IN",{year:"numeric",month:"long",day:"numeric"});
-  const sevC = {Normal:"#16a34a",Mild:"#65a30d",Moderate:"#d97706",Severe:"#dc2626"};
-  const sevB = {Normal:"#f0fdf4",Mild:"#f7fee7",Moderate:"#fffbeb",Severe:"#fef2f2"};
-
-  const SBar = ({label,value,max=100,color="#0d5c6e"}) => (
-    <div style={{marginBottom:8}}>
-      <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:3}}>
-        <span style={{color:"#374151",fontWeight:500}}>{label}</span>
-        <span style={{fontWeight:700,color,fontFamily:"'Courier New',monospace"}}>{value}</span>
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  componentDidCatch(error) { this.setState({ error: error.toString() }); }
+  render() {
+    if (this.state.error) return (
+      <div style={{padding:20,background:"#fef2f2",minHeight:"100vh",fontFamily:"monospace"}}>
+        <h2 style={{color:"#dc2626"}}>Error — please send this to Dev:</h2>
+        <pre style={{whiteSpace:"pre-wrap",fontSize:12,color:"#991b1b"}}>{this.state.error}</pre>
       </div>
-      <div style={{background:"#f3f4f6",borderRadius:3,height:6,overflow:"hidden"}}>
-        <div style={{width:`${(value/max)*100}%`,height:"100%",background:color,borderRadius:3}}/>
-      </div>
-    </div>
-  );
-
-  const [reportTab, setReportTab] = useState("clinician"); // "family" | "clinician"
-  const [reportLang, setReportLang] = useState(t); // use passed t by default
-
-  const tabStyle = (active, col) => ({
-    flex:1, padding:"10px", border:"none", borderRadius:8, fontSize:13, fontWeight:700,
-    cursor:"pointer",
-    background: active ? col : "#f1f5f9",
-    color: active ? "white" : "#64748b",
-    transition:"all 0.2s",
-  });
-
-  return (
-    <div style={{background:"#e8ecf0",minHeight:"100vh",padding:"16px 8px 80px",fontFamily:"'Segoe UI',system-ui,sans-serif"}}>
-      <style>{`@media print{body{background:white!important}#no-print{display:none!important}}`}</style>
-
-      {/* Action bar */}
-      <div id="no-print" style={{maxWidth:800,margin:"0 auto 14px"}}>
-        {/* Tab selector */}
-        <div style={{display:"flex",gap:8,marginBottom:10,background:"white",padding:8,borderRadius:12,boxShadow:"0 2px 8px rgba(0,0,0,0.08)"}}>
-          <button style={tabStyle(reportTab==="family","#0d9488")} onClick={()=>setReportTab("family")}>
-            👨‍👩‍👧 Family Report
-          </button>
-          <button style={tabStyle(reportTab==="clinician","#0d5c6e")} onClick={()=>setReportTab("clinician")}>
-            🏥 Clinician Report
-          </button>
-        </div>
-        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-          <button onClick={()=>window.print()} style={{flex:1,minWidth:130,padding:"10px",background:"#374151",color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>🖨 Print / Save PDF</button>
-          {childInfo?.fileNo && (
-            <a href={`https://esmart-report.vercel.app?reg=${childInfo.fileNo}&mode=family&lang=${lang||"en"}`}
-              target="_blank" rel="noopener noreferrer"
-              style={{flex:1,minWidth:130,padding:"10px",background:"linear-gradient(135deg,#0d9488,#10b981)",
-                color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,
-                cursor:"pointer",textDecoration:"none",textAlign:"center",display:"flex",
-                alignItems:"center",justifyContent:"center",gap:4}}>
-              📋 {t.forParent||"Family Report"} →
-            </a>
-          )}
-          <button onClick={onNew} style={{flex:1,minWidth:130,padding:"10px",background:"white",color:"#0d5c6e",border:"1.5px solid #0d5c6e",borderRadius:9,fontSize:12,fontWeight:600,cursor:"pointer"}}>{t.newAssessment}</button>
-        </div>
-      </div>
-
-      {/* ═══ FAMILY REPORT TAB ═══ */}
-      {reportTab==="family" && (
-      <div style={{maxWidth:800,margin:"0 auto",background:"white",boxShadow:"0 4px 40px rgba(0,0,0,0.12)",borderRadius:4,overflow:"hidden"}}>
-        <div style={{background:"linear-gradient(135deg,#0d5c6e,#0d9488)",padding:"20px 24px",color:"white"}}>
-          <div style={{fontSize:9,letterSpacing:"0.18em",textTransform:"uppercase",color:"#9FE1CB",marginBottom:4}}>eSMART-C · Family Report</div>
-          <div style={{fontSize:20,fontWeight:700}}>Assessment Summary for Family</div>
-          <div style={{fontSize:11,color:"rgba(255,255,255,0.7)",marginTop:2}}>CIBS Nagpur · Dr. Shailesh Pangaonkar</div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginTop:16}}>
-            {[["Name",childInfo.name||"—"],["Age",`${childInfo.age||"—"} yrs`],["School",childInfo.school||"—"],["Date",today]].map(([l,v])=>(
-              <div key={l} style={{background:"rgba(255,255,255,0.12)",borderRadius:7,padding:"7px 10px"}}>
-                <div style={{fontSize:9,opacity:0.65}}>{l}</div>
-                <div style={{fontSize:12,fontWeight:700}}>{v}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div style={{padding:"20px"}}>
-          {/* FIS result for family */}
-          <div style={{background:fisResult.bg,border:`2px solid ${fisResult.color}`,borderRadius:12,padding:"16px 20px",marginBottom:16,display:"flex",alignItems:"center",gap:20}}>
-            <div style={{textAlign:"center",minWidth:100}}>
-              <div style={{fontSize:10,color:fisResult.color,fontWeight:700,marginBottom:2}}>Thinking Skills</div>
-              <div style={{fontSize:44,fontWeight:900,color:fisResult.color,lineHeight:1,fontFamily:"monospace"}}>{fisResult.iq}</div>
-              <div style={{fontSize:10,color:fisResult.color}}>IQ · {fisResult.pct}th pct</div>
-            </div>
-            <div style={{flex:1}}>
-              <div style={{fontSize:16,fontWeight:700,color:fisResult.color,marginBottom:6}}>{fisResult.band}</div>
-              <div style={{fontSize:13,color:"#374151",lineHeight:1.7}}>{narrative?.cog_summary}</div>
-            </div>
-          </div>
-          {/* SCSS EQ for family */}
-          <div style={{background:"#fff7ed",border:"2px solid #f97316",borderRadius:12,padding:"16px 20px",marginBottom:16,display:"flex",alignItems:"center",gap:20}}>
-            <div style={{textAlign:"center",minWidth:100}}>
-              <div style={{fontSize:10,color:"#c2410c",fontWeight:700,marginBottom:2}}>Emotional Skills</div>
-              <div style={{fontSize:44,fontWeight:900,color:"#c2410c",lineHeight:1,fontFamily:"monospace"}}>{scss.d3.EQSS}</div>
-              <div style={{fontSize:10,color:"#c2410c"}}>{scss.d3.eqBand.band}</div>
-            </div>
-            <div style={{flex:1}}>
-              <div style={{fontSize:16,fontWeight:700,color:"#c2410c",marginBottom:6}}>Emotional Intelligence Profile</div>
-              <div style={{fontSize:13,color:"#374151",lineHeight:1.7}}>{narrative?.scss_summary}</div>
-            </div>
-          </div>
-          {/* Recommendations for family */}
-          <div style={{background:"#f0fdf4",borderRadius:10,padding:"16px",border:"1px solid #86efac",marginBottom:16}}>
-            <div style={{fontSize:12,fontWeight:700,color:"#15803d",marginBottom:10}}>Recommendations for Family</div>
-            {(narrative?.recommendations||"").split("\n").filter(l=>l.trim()).map((line,i)=>(
-              <div key={i} style={{display:"flex",gap:10,marginBottom:8}}>
-                <span style={{color:"#0d9488",fontWeight:700,flexShrink:0}}>{i+1}.</span>
-                <span style={{fontSize:13,color:"#1f2937",lineHeight:1.7}}>{line.replace(/^\d+\.\s*/,"")}</span>
-              </div>
-            ))}
-          </div>
-          <div style={{fontSize:11,color:"#94a3b8",textAlign:"center",padding:"10px 0",borderTop:"1px solid #f1f5f9"}}>
-            eSMART-C is a screening tool only. All findings require clinical confirmation by a qualified professional.
-          </div>
-        </div>
-      </div>
-      )}
-
-      {/* ═══ CLINICIAN REPORT TAB ═══ */}
-      {reportTab==="clinician" && (
-      <div style={{maxWidth:800,margin:"0 auto",background:"white",boxShadow:"0 4px 40px rgba(0,0,0,0.12)"}}>
-        {/* Header */}
-        <div style={{background:"linear-gradient(135deg,#0d3b47,#0d5c6e,#0d9488)",padding:"20px 24px",color:"white"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10}}>
-            <div>
-              <div style={{fontSize:9,letterSpacing:"0.18em",textTransform:"uppercase",color:"#9FE1CB",marginBottom:4}}>eSMART-C · Child Cognitive & Personality Assessment</div>
-              <div style={{fontSize:20,fontWeight:700,lineHeight:1.3}}>Combined Assessment Report</div>
-              <div style={{fontSize:11,color:"rgba(255,255,255,0.7)",marginTop:2}}>CIBS-FIS + SCSS · Central Institute of Behavioural Sciences, Nagpur</div>
-            </div>
-            <div style={{textAlign:"right",fontSize:11,color:"rgba(255,255,255,0.7)",lineHeight:2}}>
-              <div style={{color:"white",fontWeight:700,fontSize:13}}>{today}</div>
-              <div>Dr. Shailesh Pangaonkar</div>
-              <div>Director and Consultant Psychiatrist</div>
-              <div>MBBS, DPM, DNB, MSc BA</div>
-            </div>
-          </div>
-          {/* Child info strip */}
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginTop:16}}>
-            {[["Name",childInfo.name||"—"],["Age",`${childInfo.age||"—"} yrs`],["School",childInfo.school||"—"],["File No.",childInfo.fileNo||"—"]].map(([l,v])=>(
-              <div key={l} style={{background:"rgba(255,255,255,0.12)",borderRadius:7,padding:"7px 10px"}}>
-                <div style={{fontSize:9,opacity:0.65}}>{l}</div>
-                <div style={{fontSize:12,fontWeight:700}}>{v}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div style={{padding:"20px"}}>
-
-          {/* ═══ PART 1: COGNITIVE ═══ */}
-          <div style={{background:"#0d5c6e",color:"white",padding:"8px 14px",fontSize:11,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:16,marginLeft:-20,marginRight:-20}}>
-            {t.cogSection}
-          </div>
-
-          {/* IQ Score Card */}
-          <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:16,marginBottom:20,alignItems:"center"}}>
-            <div style={{background:fisResult.bg,border:`3px solid ${fisResult.color}`,borderRadius:16,padding:"20px 24px",textAlign:"center",minWidth:130}}>
-              <div style={{fontSize:11,color:fisResult.color,fontWeight:700,marginBottom:4}}>CIBS-FIS</div>
-              <div style={{fontSize:48,fontWeight:900,color:fisResult.color,lineHeight:1,fontFamily:"'Courier New',monospace"}}>{fisResult.iq}</div>
-              <div style={{fontSize:12,color:fisResult.color,marginTop:4}}>IQ Estimate</div>
-              <div style={{fontSize:11,color:"#64748b",marginTop:2}}>MA: {fisResult.ma} yrs | {fisResult.pct}th pct</div>
-            </div>
-            <div>
-              <div style={{fontSize:18,fontWeight:700,color:fisResult.color,marginBottom:6}}>{fisResult.band}</div>
-              <div style={{fontSize:13,color:"#374151",lineHeight:1.7,marginBottom:10}}>{narrative?.cog_summary}</div>
-              <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:8,padding:"10px 14px",fontSize:12,color:"#1d4ed8"}}>
-                <strong>Educational recommendation:</strong> {fisResult.edu}
-              </div>
-            </div>
-          </div>
-
-          {/* Subtest scores */}
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}}>
-            {[["Patterns","SER",fisResult.ser||0,SERIES.length,"#0d9488"],["Odd One Out","CLS",fisResult.cls||0,CLASSIF.length,"#7c3aed"],["Grids","MAT",fisResult.mat||0,MATRICES.length,"#1d4ed8"],["Positions","CON",fisResult.con||0,CONDITIONS.length,"#0891b2"]].map(([name,id,sc,mx,col])=>(
-              <div key={id} style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:8,padding:"10px 12px",textAlign:"center"}}>
-                <div style={{fontSize:10,color:"#6b7280",marginBottom:4}}>{name}</div>
-                <div style={{fontSize:22,fontWeight:800,color:col}}>{sc}</div>
-                <div style={{fontSize:10,color:"#94a3b8"}}>/{mx}</div>
-              </div>
-            ))}
-          </div>
-
-          <div style={{background:"#f8fafc",borderRadius:8,padding:"12px 14px",border:"1px solid #e2e8f0",marginBottom:20,fontSize:12,color:"#374151",lineHeight:1.7}}>
-            <strong style={{color:"#0d5c6e"}}>Clinician note:</strong> {narrative?.cog_clinical} Scale {fisResult.scale} used (ages {fisResult.scale===1?"4–8":fisResult.scale===2?"8–14":"14+"}). Formula: IQ = (Mental Age ÷ Chronological Age) × 100. Norms: Cattell (1949, 1973).
-          </div>
-
-          {/* ═══ PART 2: SCSS ═══ */}
-          <div style={{background:"#1e3a5f",color:"white",padding:"8px 14px",fontSize:11,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:16,marginLeft:-20,marginRight:-20}}>
-            {t.perSection}
-          </div>
-
-          {/* SCSS codes */}
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}}>
-            {[["I — Shape",scss.meta.shapeCode,scss.meta.firstShape,"#1e3a5f"],["II — Colour",scss.meta.colorCode,scss.meta.firstColor,"#b45309"],["III — Shade",scss.meta.shadeCode,"Shade "+scss.meta.shadeCode[0],"#6d28d9"],["IV — Smiley",scss.meta.smileyCode,scss.meta.firstSmiley,"#be185d"]].map(([l,v,first,c])=>(
-              <div key={l} style={{background:"white",border:`1px solid ${c}25`,borderRadius:6,padding:"9px 10px"}}>
-                <div style={{fontSize:8,fontWeight:700,color:c,letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:4}}>{l}</div>
-                <div style={{fontFamily:"'Courier New',monospace",fontSize:18,fontWeight:800,color:c}}>{v}</div>
-                <div style={{fontSize:9,color:"#9ca3af",marginTop:2}}>{first}</div>
-              </div>
-            ))}
-          </div>
-
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:16}}>
-            {/* Cognitive Style */}
-            <div style={{background:"#eff6ff",borderRadius:8,padding:"12px",border:"1px solid #bfdbfe"}}>
-              <div style={{fontSize:10,fontWeight:700,color:"#1e3a5f",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Cognitive Style (SCSS)</div>
-              <div style={{fontSize:14,fontWeight:700,color:"#1e3a5f",marginBottom:4}}>{scss.d1.primaryStyle}</div>
-              <div style={{fontSize:12,color:"#374151",marginBottom:8}}>{scss.d1.procOrient}</div>
-              <div style={{fontSize:11,color:"#64748b"}}>Flexibility: <strong>{scss.d1.flexLabel}</strong></div>
-            </div>
-            {/* EQ */}
-            <div style={{background:"#fff7ed",borderRadius:8,padding:"12px",border:"1px solid #fed7aa"}}>
-              <div style={{fontSize:10,fontWeight:700,color:"#9a3412",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Emotional Intelligence</div>
-              <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:8}}>
-                <span style={{fontSize:28,fontWeight:800,color:"#c2410c"}}>{scss.d3.EQSS}</span>
-                <span style={{fontSize:12,color:"#9a3412"}}>{scss.d3.eqBand.band}</span>
-              </div>
-              <SBar label="Self-Awareness" value={scss.d3.selfAwareness} color="#d97706"/>
-              <SBar label="Regulation" value={scss.d3.emoRegulation} color="#d97706"/>
-            </div>
-          </div>
-
-          {/* Personality */}
-          <div style={{background:"#f8fafc",borderRadius:8,padding:"14px",border:"1px solid #e2e8f0",marginBottom:16}}>
-            <div style={{fontSize:10,fontWeight:700,color:"#1e3a5f",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Personality Profile</div>
-            <div style={{marginBottom:8}}>
-              <span style={{fontSize:12,fontWeight:700,color:"#1e3a5f"}}>{scss.d2.dsmCluster}</span>
-              <span style={{fontSize:11,color:"#64748b",marginLeft:8}}>{scss.d2.dsmFeatures}</span>
-            </div>
-            <div style={{fontSize:12,color:"#374151",lineHeight:1.7,marginBottom:10}}>{scss.d2.dsmDesc}</div>
-            {/* Big Five bars */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 20px"}}>
-              {[["Openness","O",scss.d2.BFt.O],["Conscientiousness","C",scss.d2.BFt.C],["Extraversion","E",scss.d2.BFt.E],["Agreeableness","A",scss.d2.BFt.A],["Neuroticism","N",scss.d2.BFt.N]].map(([l,a,sc])=>{
-                const hi=sc>=55,lo=sc<45;
-                const col=hi?"#1e3a5f":lo?"#dc2626":"#6b7280";
-                return(<div key={a} style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-                  <span style={{fontSize:10,fontWeight:700,color:col,width:14}}>{a}</span>
-                  <div style={{flex:1,background:"#f3f4f6",borderRadius:2,height:5,overflow:"hidden"}}>
-                    <div style={{width:`${(sc-30)/40*100}%`,height:"100%",background:col}}/>
-                  </div>
-                  <span style={{fontSize:11,fontWeight:700,color:col,fontFamily:"'Courier New',monospace",width:24}}>{sc}</span>
-                </div>);
-              })}
-            </div>
-          </div>
-
-          {/* Health indicators */}
-          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>
-            {[["Mental Health",scss.d4.MHI,"#9d174d","#fdf2f8",[["Anxiety",scss.d4.anxIdx,scss.d4.anxLevel],["Depression",scss.d4.depIdx,scss.d4.depLevel]]],["Physical Health",scss.d4.physNorm,"#9f1239","#fff1f2",[]],["Social Functioning",scss.d4.SFI,"#6b21a8","#fdf4ff",[]]].map(([label,val,col,bg,subs])=>(
-              <div key={label} style={{background:bg,borderRadius:8,padding:"12px",border:`1px solid ${col}20`}}>
-                <div style={{fontSize:9,fontWeight:700,color:col,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:6}}>{label}</div>
-                <div style={{fontSize:24,fontWeight:800,color:col,marginBottom:4,fontFamily:"'Courier New',monospace"}}>{val}<span style={{fontSize:11,color:col,opacity:0.6}}>/100</span></div>
-                {subs.map(([sl,sv,ss])=><div key={sl} style={{fontSize:10,color:"#374151",marginBottom:2}}>{sl}: <strong>{ss}</strong> ({sv})</div>)}
-              </div>
-            ))}
-          </div>
-
-          {/* Risk profile */}
-          <div style={{background:"#fef2f2",borderRadius:8,padding:"12px 14px",border:`2px solid ${scss.d5.CRI_color}40`,marginBottom:16}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-              <div style={{fontSize:10,fontWeight:700,color:"#6b7280",textTransform:"uppercase",letterSpacing:"0.08em"}}>Combined Risk Index</div>
-              <div style={{fontSize:13,fontWeight:800,color:scss.d5.CRI_color}}>{scss.d5.CRI}</div>
-            </div>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
-              {[["Suicidal Ideation",scss.d5.SIR],["Substance Use",scss.d5.SUR],["Conduct / Delinquency",scss.d5.CDR]].map(([l,r])=>(
-                <div key={l} style={{background:r.bg,border:`1px solid ${r.border}`,borderRadius:6,padding:"8px 10px"}}>
-                  <div style={{fontSize:9,color:"#374151",marginBottom:3}}>{l}</div>
-                  <div style={{fontSize:11,fontWeight:800,color:r.color}}>{r.level}</div>
-                  <div style={{background:"#f9fafb",borderRadius:2,height:4,overflow:"hidden",marginTop:4}}>
-                    <div style={{width:`${r===scss.d5.SIR?scss.d5.SIR_raw:r===scss.d5.SUR?scss.d5.SUR_raw:scss.d5.CDR_raw}%`,height:"100%",background:r.color}}/>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Narrative summary */}
-          <div style={{background:"#f0fdf4",borderRadius:8,padding:"14px",border:"1px solid #86efac",marginBottom:16}}>
-            <div style={{fontSize:10,fontWeight:700,color:"#15803d",textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>Integrated Clinical Summary</div>
-            <div style={{fontSize:13,color:"#166534",lineHeight:1.8,fontFamily:"Georgia,serif"}}>{narrative?.combined}</div>
-          </div>
-
-          {/* Recommendations */}
-          {narrative?.recommendations && (
-            <div style={{marginBottom:16}}>
-              <div style={{background:"#0d5c6e",color:"white",padding:"7px 14px",fontSize:11,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:12,marginLeft:-20,marginRight:-20}}>Clinical Recommendations</div>
-              <div style={{fontSize:12,color:"#1f2937",lineHeight:2,fontFamily:"Georgia,serif"}}>
-                {narrative.recommendations.split("\n").filter(l=>l.trim()).map((line,i)=>(
-                  <div key={i} style={{marginBottom:4,paddingLeft:4}}>{line}</div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Disclaimer */}
-          <div style={{background:"#f8fafc",borderRadius:8,padding:"12px 14px",border:"1px solid #e2e8f0",marginBottom:16}}>
-            <div style={{fontSize:11,color:"#374151",lineHeight:1.8}}>
-              <strong>Test Limitations:</strong> CIBS-FIS is an original CIBS instrument calibrated to Cattell (1949, 1973) CFIT norms. SCSS is an original projective instrument by Dr. Shailesh Pangaonkar, CIBS Nagpur. Both are screening tools. All scores require clinical confirmation by a qualified professional. Not equivalent to full psychometric batteries (Wechsler, Stanford-Binet, NEO-PI).
-            </div>
-          </div>
-
-          {/* Signature */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20,borderTop:"1.5px solid #0d5c6e",paddingTop:14}}>
-            {["Evaluating Clinician","Supervising Clinician (if applicable)"].map(label=>(
-              <div key={label}>
-                <div style={{fontSize:10,color:"#6b7280",marginBottom:12}}>{label}</div>
-                <div style={{borderBottom:"1px dotted #cbd5e1",marginBottom:6,height:28}}/>
-                <div style={{fontSize:9,color:"#9ca3af"}}>Name & Designation: _______________________</div>
-              </div>
-            ))}
-          </div>
-
-          <div style={{marginTop:14,borderTop:"1px solid #e5e7eb",paddingTop:10,display:"flex",justifyContent:"space-between",fontSize:9,color:"#9ca3af"}}>
-            <span>eSMART-C · CIBS Nagpur · {today}</span>
-            <span>CONFIDENTIAL — For clinical use only</span>
-          </div>
-
-        </div>
-      </div>
-      )}
-    </div>
-  );
+    );
+    return this.props.children;
+  }
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  MAIN APP
-// ══════════════════════════════════════════════════════════════════════════════
-export default function App() {
-  const [lang,    setLang]    = useState(null);
-  const [screen,  setScreen]  = useState("lang");
-  const [role,    setRole]    = useState(null);
-  const [agreed,  setAgreed]  = useState(false);
-  const [childInfo, setChildInfo] = useState({name:"",dob:"",age:"",gender:"",school:"",grade:"",fileNo:getURLParam("reg")||"",examiner:getURLParam("assessor")||"",mobile:""});
+function AppInner() {
+  const [lang,   setLang]   = useState(null);
+  const [screen, setScreen] = useState("lang"); // "lang" | "role" | "letter" | "disclaimer" | "form"
+  const [role,   setRole]   = useState(null);   // "informant" | "clinician"
+  const [agreed, setAgreed] = useState(false);
+  const [step,   setStep]   = useState(1);
+  const [ci,    setCi]    = useState({ name:"",age:"",gender:"",fileNo:getURLParam("reg")||"",regNo:"",school:"",examiner:getURLParam("assessor")||"",date:new Date().toISOString().slice(0,10),dob:"",informantName:"",relation:"",mobile:"" });
+  const [p,     setP]     = useState({});
+  const [bx,    setBx]    = useState({});
+  const [sm,    setSm]    = useState({});
+  const [smEx,  setSmEx]  = useState(false);
+  const [tab,   setTab]   = useState("parent");
+  const [shUrl, setShUrl] = useState("");
+  const [shSt,  setShSt]  = useState("");
+  const [dbSubmitted, setDbSubmitted] = useState(false);
 
-  // CIBS-FIS state
-  const [fisPhase,  setFisPhase]  = useState("intro");  // intro|practice|SER|CLS|MAT|CON|done
-  const [fisScores, setFisScores] = useState({});
-  const [dbSubmitted_C, setDbSubmitted_C] = useState(false);
-  const [pracDone,  setPracDone]  = useState(false);
-  const [pracSel,   setPracSel]   = useState(null);
+  const t       = lang ? T[lang] : T.en;
+  const gl      = (item) => (lang && item[lang]) ? item[lang] : item.en;
+  const gll     = (opt)  => lang==="hi"?opt.hi : lang==="mr"?opt.mr : opt.en;
 
-  // SCSS state
-  const [scssPhase, setScssPhase] = useState("intro");
-  const [shapeSeq,  setShapeSeq]  = useState([]);
-  const [colorSeq,  setColorSeq]  = useState([]);
-  const [shadeSeq,  setShadeSeq]  = useState([]);
-  const [smileySeq, setSmileySeq] = useState([]);
-  const [storedFS,  setStoredFS]  = useState(null);
-  const [storedFC,  setStoredFC]  = useState(null);
-  const [storedShades, setStoredShades] = useState([]);
+  // Auto-detect age group from DOB or age field
+  const ageInfo = useMemo(() => detectAgeGroup(ci), [ci.dob, ci.age]);
+  const items   = BXITEMS[ageInfo.group];
+  const badge   = GROUP_BADGE[ageInfo.group];
 
-  // Results
-  const [generating, setGenerating] = useState(false);
-  const [genStep,    setGenStep]    = useState(0);
-  const [fisResult,  setFisResult]  = useState(null);
-  const [scssResult, setScssResult] = useState(null);
-  const [narrative,  setNarrative]  = useState(null);
+  const updCi  = (k,v) => setCi(x=>({...x,[k]:v}));
+  const updP   = (id,v) => setP(x=>({...x,[id]:v}));
+  const updBx  = (id,v) => setBx(x=>({...x,[id]:v}));
+  const updSm  = (id,v) => setSm(x=>({...x,[id]:v}));
 
-  const t = T[lang] || T.en;
-  const upd = (k,v) => setChildInfo(x=>({...x,[k]:v}));
+  const S   = computeScores(bx);
+  const RL  = getRiskLevel(S, t);
+  const SF  = getSuicideFlag(S);
 
-  const getAge = () => {
-    if (childInfo.dob) {
-      const ms = Date.now() - new Date(childInfo.dob).getTime();
-      if (!isNaN(ms) && ms > 0) return ms / (1000*60*60*24*365.25);
-    }
-    return parseFloat(childInfo.age) || 10;
-  };
-
-  const runReport = async (scssSeqs) => {
-    setGenerating(true);
-    const steps = [0,1,2,3,4];
-    for (const s of steps) {
-      setGenStep(s);
-      await new Promise(r => setTimeout(r, 700));
-    }
-    // Compute FIS
-    const ageYrs = getAge();
-    const gender = childInfo.gender === "F" ? "F" : "M";
-    const rawScores = fisScores;
-    const serScore = scoreSubtest(rawScores.SER||{}, SERIES);
-    const clsScore = scoreSubtest(rawScores.CLS||{}, CLASSIF);
-    const matScore = scoreSubtest(rawScores.MAT||{}, MATRICES);
-    const conScore = scoreSubtest(rawScores.CON||{}, CONDITIONS);
-    const total = serScore + clsScore + matScore + conScore;
-    const fis = computeFIS({SER:serScore,CLS:clsScore,MAT:matScore,CON:conScore}, ageYrs, gender);
-    fis.ser=serScore; fis.cls=clsScore; fis.mat=matScore; fis.con=conScore;
-    setFisResult(fis);
-    // Compute SCSS
-    const scss = computeClinical(scssSeqs.shapeSeq, scssSeqs.colorSeq, scssSeqs.shadeSeq, scssSeqs.smileySeq);
-    setScssResult(scss);
-    // Generate narrative — with 8 second timeout fallback
-    const narrativeTimeout = new Promise(resolve => setTimeout(() => resolve(null), 8000));
-    const narr = await Promise.race([generateNarrative(fis, scss, childInfo), narrativeTimeout]);
-    setNarrative(narr);
-    // ── Push to Google Sheets ──────────────────────────────────────────────
-    if (APPS_SCRIPT_URL && !APPS_SCRIPT_URL.startsWith("PASTE_")) {
-      const fileNo = (childInfo.fileNo || autoFileNo()).trim();
-      fetch(APPS_SCRIPT_URL, {
-        method:"POST", mode:"no-cors", headers:{"Content-Type":"application/json"},
+  // Auto-submit to databank when report is viewed (step >= reportStep)
+  const [autoSent, setAutoSent] = useState(false);
+  useEffect(() => {
+    if (step >= 7 && !autoSent && APPS_SCRIPT_URL && !APPS_SCRIPT_URL.startsWith("PASTE_")
+        && S && RL && typeof getSuicideFlag === "function") {
+      setAutoSent(true);
+      const fileNo = (ci.fileNo || autoFileNo()).trim();
+      fetch(APPS_SCRIPT_URL, { method:"POST", mode:"no-cors", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({
-          tool:"eSMART-C", timestamp:new Date().toISOString(), mode:"assisted",
-          fileNo, uid:"", name:childInfo.examiner||"", dob:"", age:"", gender:"",
-          mobile:childInfo.mobile||"", education:"", occupation:"",
-          referral:"", assessor:childInfo.examiner||"", notes:"",
-          // Child info
-          child_name:childInfo.name||"", child_dob:childInfo.dob||"",
-          child_age:childInfo.age||String(Math.round(getAge())),
-          child_gender:childInfo.gender||"",
-          school:childInfo.school||"", grade:childInfo.grade||"",
-          chief_complaint:"",
-          // FIS scores
-          fis_iq:fis.iq||"", fis_ma:fis.ma||"",
-          fis_band:fis.band||"", fis_label:fis.band||"",
-          fis_percentile:fis.pct||"", fis_correct:fis.total||"",
-          fis_series:fis.ser||"", fis_classif:fis.cls||"",
-          fis_matrix:fis.mat||"", fis_cond:fis.con||"",
-          // SCSS scores
-          scss_cq:scss?.d1?.CQ||"",
-          scss_cogStyle:scss?.d1?.primaryStyle||"",
-          scss_eq:scss?.d3?.EQSS||"",
-          scss_eqBand:scss?.d3?.eqBand?.band||"",
-          scss_mhi:scss?.d4?.MHI||"",
-          scss_cri:scss?.d5?.CRI||"",
-          scss_dsmCluster:scss?.d2?.dsmCluster||"",
-          scss_dsmFeatures:scss?.d2?.dsmFeatures||"",
-          scss_shapeCode:(scssSeqs.shapeSeq||[]).join(""),
-          scss_colorCode:(scssSeqs.colorSeq||[]).join(""),
-          scss_shadeCode:(scssSeqs.shadeSeq||[]).join(""),
-          scss_smileyCode:(scssSeqs.smileySeq||[]).join(""),
-          scss_validity:"Valid",
+          tool:"eSMART-P",
+          autoID: generateAutoID(ci.surname||(ci.name||"").split(" ").slice(-1)[0]||"", ci.dob, ci.mobile1||ci.mobile||"", ci.mobile2||""),
+          cibs_reg: ci.cibsReg||ci.fileNo||"",
+          c_file_no: (ci.cFileNo||ci.fileNo||"").trim(),
+          child_firstname: ci.firstName||(ci.name||"").split(" ")[0]||"",
+          child_surname: ci.surname||(ci.name||"").split(" ").slice(-1)[0]||"",
+          father_name: ci.fatherName||"",
+          mother_name: ci.motherName||"",
+          mobile1: ci.mobile1||ci.mobile||"",
+          mobile2: ci.mobile2||"",
+          email1: ci.email1||"",
+          email2: ci.email2||"",
+          city: ci.city||"",
+          timestamp:new Date().toISOString(), mode: role||"informant",
+          fileNo, uid:"", name:ci.examiner||"", dob:"", age:"", gender:"",
+          mobile:ci.mobile||"", education:"", occupation:ci.informantOccupation||"",
+          referral:"", assessor:ci.examiner||"", notes:"",
+          child_name:ci.name||"", child_dob:ci.dob||"", child_age:ci.age||"",
+          child_gender:ci.gender||"", school:ci.school||"", grade:ci.grade||"",
+          parent_name:ci.informantName||"", relationship_to_child:ci.relation||"",
+          informant_occupation:ci.informantOccupation||"",
+          age_band:ageInfo.group||"",
+          total_score:Object.values(S).reduce((a,v)=>a+(v.total||0),0)||"",
+          percentile:"", risk_level:RL.tag||"", risk_label:RL.label||"",
+          suicide_flag:getSuicideFlag(S)?"FLAGGED":"Clear",
+          idd_score:S.IDD?.total||"", idd_sev:S.IDD?.sev||"",
+          adhd_score:S.ADHD?.total||"", adhd_sev:S.ADHD?.sev||"",
+          asd_score:S.ASD?.total||"", asd_sev:S.ASD?.sev||"",
+          sld_score:S.SLD?.total||"", sld_sev:S.SLD?.sev||"",
+          mdd_score:S.MDD?.total||"", mdd_sev:S.MDD?.sev||"",
+          anx_score:S.ANX?.total||"", anx_sev:S.ANX?.sev||"",
+          odd_score:S.ODD?.total||"", odd_sev:S.ODD?.sev||"",
+          cd_score:S.CD?.total||"", cd_sev:S.CD?.sev||"",
         })
       }).catch(()=>{});
     }
-    setGenerating(false);
-    setScreen("report");
-  };
+  }, [step]);
+  const PR  = getPeriRisk(p);
+  const FR  = getFutureRisks(S, RL, SF);
+  const ANS = Array.isArray(items) ? items.filter(i => bx[i.id] !== undefined).length : 0;
+  const AFF = S ? Object.entries(S).filter(([,x]) => x.sev !== "Normal") : [];
+  const SPO = Object.values(sm).some(v => v === true);
 
-  const reset = () => {
-    setScreen("lang"); setLang(null); setRole(null); setAgreed(false);
-    setChildInfo({name:"",dob:"",age:"",gender:"",school:"",grade:"",fileNo:"",examiner:""});
-    setFisPhase("intro"); setFisScores({});
-    setScssPhase("intro"); setShapeSeq([]); setColorSeq([]); setShadeSeq([]); setSmileySeq([]);
-    setFisResult(null); setScssResult(null); setNarrative(null);
-    setPracDone(false); setPracSel(null);
-  };
+  const sevC = {Normal:"#16a34a",Mild:"#65a30d",Moderate:"#d97706",Severe:"#dc2626"};
+  const sevB = {Normal:"#dcfce7",Mild:"#f7fee7",Moderate:"#fffbeb",Severe:"#fef2f2"};
 
-  const cardStyle = {background:"white",borderRadius:14,padding:"22px 20px",maxWidth:600,width:"100%",margin:"0 auto",boxShadow:"0 2px 20px rgba(0,0,0,0.10)"};
-  const rootStyle = {minHeight:"100vh",background:"#e8ecf0",fontFamily:"'Segoe UI',system-ui,sans-serif",padding:"20px 12px 60px"};
+  function reset() {
+    setStep(1); setScreen("lang"); setLang(null); setRole(null); setAgreed(false);
+    setCi({name:"",age:"",gender:"",fileNo:"",regNo:"",school:"",examiner:"",date:new Date().toISOString().slice(0,10),dob:"",informantName:"",relation:""});
+    setP({}); setBx({}); setSm({}); setSmEx(false); setTab("parent");
+  }
 
-  // ── LANGUAGE ──
-  if (screen==="lang") return (
-    <div style={{...rootStyle,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{...cardStyle,textAlign:"center"}}>
-        <div style={{width:72,height:72,borderRadius:16,background:"linear-gradient(135deg,#0d5c6e,#0d9488)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 16px"}}>
-          <svg width={40} height={40} viewBox="0 0 40 40"><circle cx={20} cy={12} r={5} fill="#5DCAA5"/><circle cx={10} cy={20} r={3.5} fill="#9FE1CB"/><circle cx={30} cy={20} r={3.5} fill="#9FE1CB"/><circle cx={14} cy={30} r={4} fill="#1D9E75"/><circle cx={26} cy={30} r={4} fill="#1D9E75"/><line x1={20} y1={17} x2={10} y2={20} stroke="#9FE1CB" strokeWidth={1.2} opacity="0.9"/><line x1={20} y1={17} x2={30} y2={20} stroke="#9FE1CB" strokeWidth={1.2} opacity="0.9"/><line x1={10} y1={23} x2={14} y2={30} stroke="#5DCAA5" strokeWidth={1.2} opacity="0.8"/><line x1={30} y1={23} x2={26} y2={30} stroke="#5DCAA5" strokeWidth={1.2} opacity="0.8"/></svg>
+  function sendSheets() {
+    const url = APPS_SCRIPT_URL;
+    if (!url || url.startsWith("PASTE_")) { setShSt("⚠️ Apps Script URL not configured."); return; }
+    const fileNo = (ci.fileNo || autoFileNo()).trim();
+    setShSt("⏳ Sending...");
+    fetch(url, { method:"POST", mode:"no-cors", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        tool:"eSMART-P",
+          autoID: generateAutoID(ci.surname||(ci.name||"").split(" ").slice(-1)[0]||"", ci.dob, ci.mobile1||ci.mobile||"", ci.mobile2||""),
+          cibs_reg: ci.cibsReg||ci.fileNo||"",
+          c_file_no: (ci.cFileNo||ci.fileNo||"").trim(),
+          child_firstname: ci.firstName||(ci.name||"").split(" ")[0]||"",
+          child_surname: ci.surname||(ci.name||"").split(" ").slice(-1)[0]||"",
+          father_name: ci.fatherName||"",
+          mother_name: ci.motherName||"",
+          mobile1: ci.mobile1||ci.mobile||"",
+          mobile2: ci.mobile2||"",
+          email1: ci.email1||"",
+          email2: ci.email2||"",
+          city: ci.city||"",
+          timestamp:new Date().toISOString(), mode: role||"informant",
+        fileNo, uid:"", name:ci.examiner||"", dob:"", age:"", gender:"",
+        mobile:ci.mobile||"", education:"", occupation:ci.informantOccupation||"",
+        referral:"", assessor:ci.examiner||"", notes:"",
+        // Child info
+        child_name:ci.name||"", child_dob:ci.dob||"", child_age:ci.age||"",
+        child_gender:ci.gender||"", school:ci.school||"", grade:ci.grade||"",
+        // Informant info
+        parent_name:ci.informantName||"", relationship_to_child:ci.relation||"",
+        informant_occupation:ci.informantOccupation||"",
+        // Age band & risk
+        age_band:ageInfo.group||"",
+        total_score:Object.values(S).reduce((a,v)=>a+(v.total||0),0)||"",
+        percentile:"",
+        risk_level:RL.tag||"", risk_label:RL.label||"",
+        suicide_flag:getSuicideFlag(S)?"FLAGGED":"Clear",
+        // Domain scores — DSM-5 aligned
+        idd_score:S.IDD?.total||"", idd_sev:S.IDD?.sev||"",
+        adhd_score:S.ADHD?.total||"", adhd_sev:S.ADHD?.sev||"",
+        asd_score:S.ASD?.total||"", asd_sev:S.ASD?.sev||"",
+        sld_score:S.SLD?.total||"", sld_sev:S.SLD?.sev||"",
+        mdd_score:S.MDD?.total||"", mdd_sev:S.MDD?.sev||"",
+        anx_score:S.ANX?.total||"", anx_sev:S.ANX?.sev||"",
+        odd_score:S.ODD?.total||"", odd_sev:S.ODD?.sev||"",
+        cd_score:S.CD?.total||"", cd_sev:S.CD?.sev||"",
+      })
+    }).then(()=>setShSt("✅ Sent to Google Sheets!")).catch(()=>setShSt("❌ Failed. Check URL."));
+  }
+
+  // fields rendered inline below
+
+  const btn = (lbl,fn,col="#0d5c6e",disabled=false) => (
+    <button onClick={fn} disabled={disabled} style={{padding:"11px 28px",borderRadius:9,background:disabled?"#e2e8f0":col,color:disabled?"#94a3b8":"#fff",border:"none",fontSize:14,fontWeight:700,cursor:disabled?"not-allowed":"pointer"}}>{lbl}</button>
+  );
+
+  // ── SCREEN: LANGUAGE SELECTION ───────────────────────────
+  if (screen === "lang" || !lang) return (
+    <div style={{fontFamily:"'Segoe UI',system-ui,sans-serif",background:"linear-gradient(135deg,#0d3b47,#0d9488)",minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{background:"#fff",borderRadius:20,padding:40,maxWidth:460,width:"100%",textAlign:"center",boxShadow:"0 20px 60px rgba(0,0,0,0.25)"}}>
+        <div style={{width:72,height:72,borderRadius:16,margin:"0 auto 16px",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+          <svg width="72" height="72" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg">
+            <rect width="72" height="72" rx="14" fill="#0d5c6e"/>
+            <circle cx="36" cy="22" r="5.5" fill="#5DCAA5"/>
+            <circle cx="22" cy="32" r="4" fill="#9FE1CB"/>
+            <circle cx="50" cy="32" r="4" fill="#9FE1CB"/>
+            <circle cx="28" cy="46" r="5" fill="#1D9E75"/>
+            <circle cx="44" cy="46" r="5" fill="#1D9E75"/>
+            <line x1="36" y1="27" x2="22" y2="32" stroke="#9FE1CB" strokeWidth="1.2" opacity="0.8"/>
+            <line x1="36" y1="27" x2="50" y2="32" stroke="#9FE1CB" strokeWidth="1.2" opacity="0.8"/>
+            <line x1="22" y1="36" x2="28" y2="46" stroke="#5DCAA5" strokeWidth="1.2" opacity="0.7"/>
+            <line x1="50" y1="36" x2="44" y2="46" stroke="#5DCAA5" strokeWidth="1.2" opacity="0.7"/>
+            <line x1="22" y1="36" x2="44" y2="46" stroke="#9FE1CB" strokeWidth="0.8" opacity="0.3"/>
+            <line x1="50" y1="36" x2="28" y2="46" stroke="#9FE1CB" strokeWidth="0.8" opacity="0.3"/>
+            <text x="36" y="63" fontFamily="'Segoe UI',system-ui,sans-serif" fontSize="10" fontWeight="800" fill="#E1F5EE" textAnchor="middle" letterSpacing="1.5">CIBS</text>
+          </svg>
         </div>
-        <h1 style={{fontSize:26,fontWeight:900,color:"#0d3b47",margin:"0 0 4px"}}>eSMART-C</h1>
-        <p style={{color:"#64748b",fontSize:13,margin:"0 0 4px"}}>Child Cognitive & Personality Assessment</p>
-        <p style={{color:"#94a3b8",fontSize:11,margin:"0 0 28px"}}>CIBS Nagpur · Dr. Shailesh Pangaonkar</p>
-        <h2 style={{fontSize:15,fontWeight:700,color:"#374151",margin:"0 0 14px"}}>Choose Language / भाषा चुनें / भाषा निवडा</h2>
+        <h1 style={{fontSize:26,fontWeight:900,color:"#0d3b47",margin:"0 0 4px"}}>eSMART-P</h1>
+        <p style={{color:"#64748b",fontSize:13,margin:"0 0 4px"}}>Parent / Caregiver Screening Questionnaire</p>
+        <p style={{color:"#94a3b8",fontSize:12,margin:"0 0 32px"}}>CIBS Nagpur · Dr. Shailesh Pangaonkar</p>
+        <h2 style={{fontSize:15,fontWeight:700,color:"#374151",margin:"0 0 16px"}}>Choose Language / भाषा चुनें / भाषा निवडा</h2>
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {[{c:"en",l:"English",s:"Continue in English",f:"🇬🇧"},{c:"hi",l:"हिन्दी",s:"हिन्दी में जारी रखें",f:"🇮🇳"},{c:"mr",l:"मराठी",s:"मराठीत पुढे जा",f:"🟠"}].map(o=>(
-            <button key={o.c} onClick={()=>{setLang(o.c);setScreen("role");}} style={{padding:"13px 18px",borderRadius:12,border:"2px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",display:"flex",alignItems:"center",gap:14,textAlign:"left"}} onMouseOver={e=>{e.currentTarget.style.borderColor="#0d9488";e.currentTarget.style.background="#f0fdfa";}} onMouseOut={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#f8fafc";}}>
-              <span style={{fontSize:26}}>{o.f}</span>
-              <div><div style={{fontSize:15,fontWeight:700,color:"#1e293b"}}>{o.l}</div><div style={{fontSize:12,color:"#64748b"}}>{o.s}</div></div>
+            <button key={o.c} onClick={()=>{setLang(o.c);setScreen("role");}} style={{padding:"14px 20px",borderRadius:12,border:"2px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",display:"flex",alignItems:"center",gap:14,textAlign:"left"}}
+              onMouseOver={e=>{e.currentTarget.style.borderColor="#0d9488";e.currentTarget.style.background="#f0fdfa";}}
+              onMouseOut={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#f8fafc";}}>
+              <span style={{fontSize:28}}>{o.f}</span>
+              <div><div style={{fontSize:16,fontWeight:700,color:"#1e293b"}}>{o.l}</div><div style={{fontSize:12,color:"#64748b"}}>{o.s}</div></div>
             </button>
           ))}
         </div>
@@ -1544,334 +1208,555 @@ export default function App() {
     </div>
   );
 
-  // ── ROLE ──
-  if (screen==="role") return (
-    <div style={{...rootStyle,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={cardStyle}>
-        <h2 style={{fontSize:17,fontWeight:800,color:"#0d3b47",margin:"0 0 6px",textAlign:"center"}}>eSMART-C</h2>
-        <p style={{color:"#64748b",fontSize:13,textAlign:"center",margin:"0 0 20px"}}>{t.whoFills}</p>
-        {[{r:"clinician",icon:"🩺",lbl:t.clinician,sub:t.clinSub},{r:"parent",icon:"👨‍👩‍👧",lbl:t.parent,sub:t.parSub}].map(o=>(
-          <button key={o.r} onClick={()=>{setRole(o.r);setScreen("childinfo");}} style={{width:"100%",padding:"16px 18px",borderRadius:12,border:"2px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",display:"flex",alignItems:"center",gap:14,textAlign:"left",marginBottom:10}} onMouseOver={e=>{e.currentTarget.style.borderColor="#0d9488";e.currentTarget.style.background="#f0fdfa";}} onMouseOut={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#f8fafc";}}>
-            <span style={{fontSize:32}}>{o.icon}</span>
-            <div><div style={{fontSize:14,fontWeight:700,color:"#1e293b"}}>{o.lbl}</div><div style={{fontSize:11,color:"#64748b",marginTop:2}}>{o.sub}</div></div>
-          </button>
-        ))}
-        <button onClick={()=>setScreen("lang")} style={{width:"100%",padding:"8px",borderRadius:8,background:"#f1f5f9",color:"#64748b",border:"none",fontSize:12,cursor:"pointer",marginTop:8}}>← Change Language</button>
-      </div>
-    </div>
-  );
+  const ltr = (LETTERS[role] || LETTERS.informant)[lang] || LETTERS[role||"informant"].en;
+  const dis = DISCLAIMER_TEXT[lang] || DISCLAIMER_TEXT.en;
 
-  // ── CHILD INFO ──
-  if (screen==="childinfo") {
-    const fld = (lbl,k,type="text") => (
-      <div style={{display:"flex",flexDirection:"column",gap:4}}>
-        <label style={{fontSize:11,fontWeight:600,color:"#475569"}}>{lbl}</label>
-        <input type={type} value={childInfo[k]} onChange={e=>upd(k,e.target.value)} style={{padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:13,color:"#1e293b",outline:"none",background:"#fafafa"}}/>
-      </div>
-    );
-    return (
-      <div style={rootStyle}>
-        <div style={cardStyle}>
-          <h2 style={{fontSize:16,fontWeight:800,color:"#0d5c6e",margin:"0 0 16px"}}>👶 {t.childInfo}</h2>
-          {/* FileNo banner */}
-          <div style={{marginBottom:14,padding:"10px 14px",background:"#F5F3FF",borderRadius:8,border:"1px solid #DDD6FE"}}>
-            <label style={{fontSize:11,fontWeight:700,color:"#6D28D9",display:"block",marginBottom:4}}>Registration No. (FileNo) ★</label>
-            {getURLParam("reg")
-              ? <div style={{fontFamily:"monospace",fontSize:15,fontWeight:900,color:"#5B21B6"}}>{childInfo.fileNo}<span style={{fontSize:10,marginLeft:8,color:"#A78BFA"}}>Pre-filled by CIBS</span></div>
-              : <input value={childInfo.fileNo} onChange={e=>upd("fileNo",e.target.value)} placeholder="CIBS-26-0001 (leave blank to auto-generate)" style={{width:"100%",boxSizing:"border-box",padding:"7px 10px",border:"1.5px solid #DDD6FE",borderRadius:7,fontSize:13,fontFamily:"monospace",color:"#5B21B6",background:"white"}}/>
-            }
-          </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
-            <div style={{gridColumn:"1/-1"}}>{fld(t.childName,"name")}</div>
-            {fld(t.dob,"dob","date")}
-            {fld(t.age,"age","number")}
-            <div>
-              <label style={{fontSize:11,fontWeight:600,color:"#475569",display:"block",marginBottom:4}}>{t.gender}</label>
-              <select value={childInfo.gender} onChange={e=>upd("gender",e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:13,color:"#1e293b",background:"#fafafa"}}>
-                <option value="">Select...</option>
-                <option value="M">{t.gM}</option><option value="F">{t.gF}</option><option value="O">{t.gO}</option>
-              </select>
-            </div>
-            {fld(t.grade,"grade")}
-            {fld(t.school,"school")}
-            {fld(t.examiner,"examiner")}
-          </div>
-          <div style={{display:"flex",gap:10}}>
-            <button onClick={()=>setScreen("role")} style={{flex:1,padding:"10px",borderRadius:9,background:"#f1f5f9",color:"#475569",border:"none",fontSize:13,cursor:"pointer"}}>{t.back}</button>
-            <button onClick={()=>setScreen("disclaimer")} disabled={!childInfo.gender} style={{flex:2,padding:"12px",borderRadius:9,background:childInfo.gender?"#0d5c6e":"#e2e8f0",color:childInfo.gender?"#fff":"#94a3b8",border:"none",fontSize:14,fontWeight:700,cursor:childInfo.name?"pointer":"not-allowed"}}>{t.next}</button>
-          </div>
+  // ── SCREEN: ROLE SELECTION ────────────────────────────────
+  if (screen === "role") return (
+    <div style={{fontFamily:"'Segoe UI',system-ui,sans-serif",background:"linear-gradient(135deg,#0d3b47,#0d9488)",minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{background:"#fff",borderRadius:20,padding:40,maxWidth:480,width:"100%",boxShadow:"0 20px 60px rgba(0,0,0,0.25)"}}>
+        <div style={{textAlign:"center",marginBottom:24}}>
+          <h2 style={{fontSize:20,fontWeight:800,color:"#0d3b47",margin:"0 0 6px"}}>🧠 eSMART-P</h2>
+          <p style={{color:"#64748b",fontSize:13,margin:0}}>
+            {lang==="hi" ? "आप इस प्रश्नावली को किस रूप में भर रहे हैं?" : lang==="mr" ? "आपण ही प्रश्नावली कोणत्या भूमिकेत भरत आहात?" : "Who is filling this questionnaire?"}
+          </p>
         </div>
-      </div>
-    );
-  }
-
-  // ── DISCLAIMER ──
-  if (screen==="disclaimer") return (
-    <div style={rootStyle}>
-      <div style={cardStyle}>
-        <div style={{background:"#fff7ed",borderBottom:"2px solid #fed7aa",padding:"14px 16px",marginLeft:-20,marginRight:-20,marginTop:-22,borderRadius:"14px 14px 0 0",display:"flex",gap:12,marginBottom:16}}>
-          <span style={{fontSize:24}}>⚖️</span>
-          <div>
-            <h2 style={{fontSize:15,fontWeight:800,color:"#9a3412",margin:"0 0 3px"}}>{t.disclaimer}</h2>
-            <p style={{fontSize:11,color:"#c2410c",margin:0}}>Please read carefully before proceeding</p>
-          </div>
-        </div>
-        {(t.discPoints||[]).map((pt,i)=>(
-          <div key={i} style={{display:"flex",gap:10,marginBottom:12,alignItems:"flex-start"}}>
-            <div style={{minWidth:22,height:22,borderRadius:"50%",background:i<=1?"#fef2f2":"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:i<=1?"#dc2626":"#16a34a",flexShrink:0,marginTop:1}}>{i+1}</div>
-            <p style={{margin:0,fontSize:12,color:"#374151",lineHeight:1.6}}>{pt}</p>
-          </div>
-        ))}
-        <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:10,padding:"11px 14px",marginBottom:14,display:"flex",gap:10,alignItems:"center"}}>
-          <span style={{fontSize:18}}>🏥</span>
-          <div><p style={{margin:0,fontSize:11,fontWeight:700,color:"#1d4ed8"}}>Central Institute of Behavioural Sciences (CIBS), Nagpur</p><p style={{margin:0,fontSize:10,color:"#64748b"}}>ICMR Guidelines Compliant · ICH-GCP Standards</p></div>
-        </div>
-        <label style={{display:"flex",gap:10,alignItems:"flex-start",cursor:"pointer",padding:"12px 14px",background:agreed?"#f0fdf4":"#f8fafc",borderRadius:10,border:`2px solid ${agreed?"#86efac":"#e2e8f0"}`,marginBottom:14,transition:"all 0.2s"}}>
-          <input type="checkbox" checked={agreed} onChange={e=>setAgreed(e.target.checked)} style={{width:17,height:17,marginTop:1,accentColor:"#0d9488"}}/>
-          <span style={{fontSize:12,fontWeight:600,color:agreed?"#15803d":"#374151",lineHeight:1.5}}>{t.agreeText}</span>
-        </label>
-        <div style={{display:"flex",gap:10}}>
-          <button onClick={()=>setScreen("childinfo")} style={{flex:1,padding:"10px",borderRadius:9,background:"#f1f5f9",color:"#475569",border:"none",fontSize:13,cursor:"pointer"}}>{t.back}</button>
-          <button onClick={()=>{if(agreed){setScreen("fis");}}} disabled={!agreed} style={{flex:2,padding:"12px",borderRadius:9,background:agreed?"#0d5c6e":"#e2e8f0",color:agreed?"#fff":"#94a3b8",border:"none",fontSize:14,fontWeight:700,cursor:agreed?"pointer":"not-allowed"}}>{t.proceedBtn}</button>
-        </div>
-      </div>
-    </div>
-  );
-
-  // ── FIS SCREENS ──
-  if (screen==="fis") {
-    const TEAL = "#0d9488";
-
-    // FIS Intro
-    if (fisPhase==="intro") return (
-      <div style={rootStyle}>
-        <div style={cardStyle}>
-          <div style={{background:"linear-gradient(135deg,#0d5c6e,#0d9488)",borderRadius:12,padding:"18px",color:"white",marginBottom:18}}>
-            <div style={{fontSize:10,letterSpacing:"0.15em",textTransform:"uppercase",color:"#9FE1CB",marginBottom:4}}>Part 1 of 2</div>
-            <h2 style={{fontSize:17,fontWeight:800,margin:"0 0 6px"}}>{t.part1Name}</h2>
-            <p style={{fontSize:12,opacity:0.85,margin:0}}>{t.p1Intro}</p>
-          </div>
-          <p style={{fontSize:13,color:"#374151",marginBottom:14}}>{t.p1Note}</p>
-          <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:20}}>
-            {t.subtests.map((st,i)=>(
-              <div key={st.id} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 12px",background:"#f8fafc",borderRadius:8,border:"1px solid #e2e8f0"}}>
-                <div style={{width:28,height:28,borderRadius:"50%",background:TEAL,color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,flexShrink:0}}>{i+1}</div>
-                <div style={{flex:1}}>
-                  <div style={{fontSize:13,fontWeight:600,color:"#1e293b"}}>{st.name}</div>
-                  <div style={{fontSize:11,color:"#64748b"}}>{st.desc}</div>
-                </div>
-                <div style={{textAlign:"right",fontSize:11,color:"#94a3b8"}}>
-                  <div>{st.items} items</div>
-                  <div>{st.mins} min</div>
-                </div>
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {[
+            { r:"informant", icon:"👨‍👩‍👧", en:"Parent / Caregiver / Guardian", hi:"माता-पिता / देखभालकर्ता / अभिभावक", mr:"पालक / काळजीवाहू / पालकत्व",
+              sub_en:"I am the parent or primary caregiver of the child", sub_hi:"मैं बच्चे का माता-पिता या प्राथमिक देखभालकर्ता हूँ", sub_mr:"मी मुलाचा पालक किंवा प्राथमिक काळजीवाहू आहे" },
+            { r:"clinician", icon:"🩺", en:"Clinician / Teacher / Researcher", hi:"चिकित्सक / शिक्षक / शोधकर्ता", mr:"वैद्य / शिक्षक / संशोधक",
+              sub_en:"I am a health professional, teacher, or researcher", sub_hi:"मैं स्वास्थ्य पेशेवर, शिक्षक या शोधकर्ता हूँ", sub_mr:"मी आरोग्य व्यावसायिक, शिक्षक किंवा संशोधक आहे" },
+          ].map(o=>(
+            <button key={o.r} onClick={()=>{setRole(o.r);setScreen("letter");}} style={{padding:"18px 20px",borderRadius:12,border:"2px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",display:"flex",alignItems:"center",gap:16,textAlign:"left"}}
+              onMouseOver={e=>{e.currentTarget.style.borderColor="#0d9488";e.currentTarget.style.background="#f0fdfa";}}
+              onMouseOut={e=>{e.currentTarget.style.borderColor="#e2e8f0";e.currentTarget.style.background="#f8fafc";}}>
+              <span style={{fontSize:36}}>{o.icon}</span>
+              <div>
+                <div style={{fontSize:15,fontWeight:700,color:"#1e293b"}}>{lang==="hi"?o.hi:lang==="mr"?o.mr:o.en}</div>
+                <div style={{fontSize:12,color:"#64748b",marginTop:2}}>{lang==="hi"?o.sub_hi:lang==="mr"?o.sub_mr:o.sub_en}</div>
               </div>
-            ))}
-          </div>
-          <button onClick={()=>setFisPhase("practice")} style={{width:"100%",padding:"13px",borderRadius:10,background:"#0d5c6e",color:"white",border:"none",fontSize:14,fontWeight:700,cursor:"pointer"}}>{t.startTest}</button>
-        </div>
-      </div>
-    );
-
-    // Practice
-    if (fisPhase==="practice") return (
-      <div style={rootStyle}>
-        <div style={cardStyle}>
-          <div style={{background:"#f0fdf4",border:"1px solid #86efac",borderRadius:10,padding:"12px 14px",marginBottom:18}}>
-            <h3 style={{fontSize:14,fontWeight:700,color:"#15803d",margin:"0 0 6px"}}>{t.practiceTitle}</h3>
-            <p style={{fontSize:12,color:"#166534",margin:0}}>{t.practiceInstr}</p>
-          </div>
-          {/* Sequence */}
-          <div style={{display:"flex",alignItems:"center",gap:8,justifyContent:"center",marginBottom:20,flexWrap:"wrap"}}>
-            {PRACTICE.seq.map((fig,i)=><FigBox key={i} fig={fig} size={54}/>)}
-            <div style={{width:54,height:54,border:"2px dashed #0d9488",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",background:"#f0fdfa"}}><span style={{fontSize:20,color:"#0d9488",fontWeight:800}}>?</span></div>
-          </div>
-          {/* Choices */}
-          <div style={{display:"flex",gap:8,justifyContent:"center",marginBottom:16}}>
-            {PRACTICE.choices.map((fig,i)=>(
-              <div key={i} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                <FigBox fig={fig} size={54} selected={pracSel===i} onClick={()=>{if(!pracDone){setPracSel(i);}}}/>
-                <span style={{fontSize:12,fontWeight:700,color:pracSel===i?"#0d5c6e":"#94a3b8"}}>{i+1}</span>
-              </div>
-            ))}
-          </div>
-          {pracSel!==null && (
-            <div style={{textAlign:"center",padding:"12px",borderRadius:8,background:pracSel===PRACTICE.ans?"#f0fdf4":"#fef2f2",border:`1px solid ${pracSel===PRACTICE.ans?"#86efac":"#fca5a5"}`,marginBottom:14}}>
-              <span style={{fontWeight:700,fontSize:13,color:pracSel===PRACTICE.ans?"#16a34a":"#dc2626"}}>{pracSel===PRACTICE.ans?"✅ Correct! The shapes have increasing sides: Triangle → Square → Pentagon → Hexagon":"❌ Not quite. Look for the pattern in the number of sides: Triangle(3) → Square(4) → Pentagon(5) → ?"}</span>
-            </div>
-          )}
-          <button onClick={()=>setFisPhase("SER")} style={{width:"100%",padding:"12px",borderRadius:10,background:"#0d5c6e",color:"white",border:"none",fontSize:14,fontWeight:700,cursor:"pointer"}}>{t.startTest}</button>
-        </div>
-      </div>
-    );
-
-    // Subtests
-    const subtestMap = {SER:"CLS", CLS:"MAT", MAT:"CON", CON:"done"};
-    const subtestColors = {SER:"#0d9488",CLS:"#7c3aed",MAT:"#1d4ed8",CON:"#0891b2"};
-    const subtestNames = {SER:t.subtests[0],CLS:t.subtests[1],MAT:t.subtests[2],CON:t.subtests[3]};
-
-    if (["SER","CLS","MAT","CON"].includes(fisPhase)) {
-      const stInfo = subtestNames[fisPhase];
-      const totalSecs = Math.round(stInfo.mins * 60);
-      const col = subtestColors[fisPhase];
-      const onSubtestComplete = (ans) => {
-        setFisScores(prev => ({...prev, [fisPhase]: ans}));
-        const next = subtestMap[fisPhase];
-        if (next === "done") { setScreen("scss"); }
-        else { setFisPhase(next); }
-      };
-      return (
-        <div style={rootStyle}>
-          <div style={cardStyle}>
-            {/* Header */}
-            <div style={{background:col,borderRadius:10,padding:"12px 14px",color:"white",marginBottom:14}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <div>
-                  <div style={{fontSize:9,letterSpacing:"0.15em",textTransform:"uppercase",opacity:0.8}}>CIBS-FIS · {stInfo.name}</div>
-                  <div style={{fontSize:14,fontWeight:700}}>{stInfo.desc}</div>
-                </div>
-                <div style={{fontSize:10,opacity:0.8,textAlign:"right"}}>{stInfo.items} items · {stInfo.mins} min</div>
-              </div>
-              <Timer totalSecs={totalSecs} onTimeout={onSubtestComplete} t={t}/>
-            </div>
-            {fisPhase==="SER" && <SeriesSubtest onComplete={onSubtestComplete} t={t}/>}
-            {fisPhase==="CLS" && <ClassifSubtest onComplete={onSubtestComplete} t={t}/>}
-            {fisPhase==="MAT" && <MatrixSubtest onComplete={onSubtestComplete} t={t}/>}
-            {fisPhase==="CON" && <CondSubtest onComplete={onSubtestComplete} t={t}/>}
-          </div>
-        </div>
-      );
-    }
-  }
-
-  // ── SCSS SCREENS ──
-  if (screen==="scss") {
-    if (scssPhase==="intro") return (
-      <div style={rootStyle}>
-        <div style={cardStyle}>
-          <div style={{background:"linear-gradient(135deg,#1e3a5f,#374151)",borderRadius:12,padding:"18px",color:"white",marginBottom:18}}>
-            <div style={{fontSize:10,letterSpacing:"0.15em",textTransform:"uppercase",color:"#9FE1CB",marginBottom:4}}>Part 2 of 2</div>
-            <h2 style={{fontSize:17,fontWeight:800,margin:"0 0 6px"}}>{t.part2Name}</h2>
-            <p style={{fontSize:12,opacity:0.85,margin:0}}>{t.p2Intro}</p>
-          </div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginBottom:20}}>
-            {(t.p2stages||[]).map((s,i)=>{
-              const cols=["#1e3a5f","#b45309","#6d28d9","#be185d"];
-              return(<div key={s} style={{borderRadius:8,padding:"10px",background:"#f8fafc",border:`1px solid ${cols[i]}20`,borderLeft:`3px solid ${cols[i]}`}}><div style={{fontSize:11,fontWeight:700,color:cols[i]}}>Stage {i+1}</div><div style={{fontSize:13,color:"#374151",fontWeight:500}}>{s}</div></div>);
-            })}
-          </div>
-          <div style={{display:"flex",gap:7,alignItems:"center",justifyContent:"center",marginBottom:18}}>
-            {SHAPES_SCSS.slice(0,5).map((sh,i)=>(
-              <div key={sh.code} style={{width:40,height:40,borderRadius:"50%",background:"white",boxShadow:"0 2px 10px rgba(30,58,95,0.12)",display:"flex",alignItems:"center",justifyContent:"center"}}>
-                <ShapeSCSS code={sh.code} fill="#9ca3af" size={24}/>
-              </div>
-            ))}
-          </div>
-          <button onClick={()=>setScssPhase("s1")} style={{width:"100%",padding:"13px",borderRadius:10,background:"#1e3a5f",color:"white",border:"none",fontSize:14,fontWeight:700,cursor:"pointer"}}>Begin Stage 1 →</button>
-        </div>
-      </div>
-    );
-
-    const scssCard = {background:"white",borderRadius:12,padding:"18px 16px",maxWidth:560,width:"100%",margin:"0 auto",boxShadow:"0 2px 16px rgba(0,0,0,0.08)"};
-
-    if (scssPhase==="s1") return (
-      <div style={{...rootStyle,paddingBottom:80}}>
-        <div style={scssCard}>
-          <SelectionStage key="s1" stageKey="s1" accentColor="#64748b" title="Stage 1 — Shapes"
-            instr="Select the shape you like most first. Then continue until all 7 are selected."
-            items={SHAPES_SCSS}
-            renderItem={(item,sz)=><ShapeSCSS code={item.code} fill="#9ca3af" size={sz}/>}
-            onComplete={seq=>{
-              setStoredFS(SHAPES_SCSS.find(s=>s.code===seq[0])||SHAPES_SCSS[0]);
-              setShapeSeq(seq); setScssPhase("s2");
-            }}/>
-        </div>
-      </div>
-    );
-
-    if (scssPhase==="s2") return (
-      <div style={{...rootStyle,paddingBottom:80}}>
-        <div style={scssCard}>
-          <div style={{textAlign:"center",marginBottom:10}}>
-            <span style={{display:"inline-flex",alignItems:"center",gap:7,background:"rgba(30,58,95,0.07)",borderRadius:100,padding:"4px 12px"}}>
-              <ShapeSCSS code={storedFS?.code||1} fill="#1e3a5f" size={20}/>
-              <span style={{fontSize:12,color:"#1e3a5f",fontWeight:600}}>Primary shape: {storedFS?.name}</span>
-            </span>
-          </div>
-          <SelectionStage key="s2" stageKey="s2" accentColor="#b45309" title="Stage 2 — Colours"
-            instr="Select the colour you like most first."
-            items={COLORS_SCSS}
-            renderItem={(item,sz)=><ShapeSCSS code={storedFS?.code||1} fill={item.hex} size={sz}/>}
-            onComplete={seq=>{
-              const fc=COLORS_SCSS.find(c=>c.code===seq[0])||COLORS_SCSS[0];
-              setStoredFC(fc); setStoredShades(generateShades(fc.hex));
-              setColorSeq(seq); setScssPhase("s3");
-            }}/>
-        </div>
-      </div>
-    );
-
-    if (scssPhase==="s3") return (
-      <div style={{...rootStyle,paddingBottom:80}}>
-        <div style={scssCard}>
-          <div style={{textAlign:"center",marginBottom:10}}>
-            <span style={{display:"inline-flex",alignItems:"center",gap:7,background:"rgba(30,58,95,0.07)",borderRadius:100,padding:"4px 12px"}}>
-              <ShapeSCSS code={storedFS?.code||1} fill={storedFC?.hex||"#1e3a5f"} size={20}/>
-              <span style={{fontSize:12,color:"#1e3a5f",fontWeight:600}}>{storedFS?.name} · {storedFC?.name} shades</span>
-            </span>
-          </div>
-          <SelectionStage key="s3" stageKey="s3" accentColor="#6d28d9" title="Stage 3 — Shades"
-            instr="Select the shade you like most first."
-            items={storedShades}
-            renderItem={(item,sz)=><ShapeSCSS code={storedFS?.code||1} fill={item.hex} size={sz}/>}
-            onComplete={seq=>{setShadeSeq(seq); setScssPhase("s4");}}/>
-        </div>
-      </div>
-    );
-
-    if (scssPhase==="s4") return (
-      <div style={{...rootStyle,paddingBottom:80}}>
-        <div style={scssCard}>
-          <SelectionStage key="s4" stageKey="s4" accentColor="#be185d" title="Stage 4 — Feelings"
-            instr="Select the expression that shows how you feel most right now."
-            items={SMILEYS_SCSS}
-            renderItem={(item,sz)=><span style={{fontSize:Math.round(sz*0.72),lineHeight:1,userSelect:"none"}}>{item.emoji}</span>}
-            onComplete={seq=>{
-              setSmileySeq(seq);
-              runReport({shapeSeq,colorSeq,shadeSeq,smileySeq:seq});
-            }}/>
-          {smileySeq.length>0 && (
-            <div style={{padding:"0 4px 16px"}}>
-              <button onClick={()=>runReport({shapeSeq,colorSeq,shadeSeq,smileySeq})}
-                style={{width:"100%",padding:"14px",borderRadius:10,background:"#1e3a5f",color:"white",border:"none",fontSize:14,fontWeight:700,cursor:"pointer"}}>
-                ✅ Generate Report →
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // ── GENERATING ──
-  if (generating) return (
-    <div style={{...rootStyle,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <div style={{textAlign:"center",maxWidth:340,padding:20}}>
-        <div style={{width:56,height:56,border:"3px solid #e2e8f0",borderTopColor:"#0d5c6e",borderRadius:"50%",animation:"spin 1s linear infinite",margin:"0 auto 20px"}}/>
-        <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}`}</style>
-        <h2 style={{fontSize:20,color:"#0d3b47",marginBottom:10}}>{t.generating}</h2>
-        <div style={{display:"flex",gap:5,justifyContent:"center",flexWrap:"wrap",marginTop:14}}>
-          {(t.genSteps||[]).map((s,i)=>(
-            <span key={s} style={{fontSize:10,color:i===genStep?"#0d5c6e":"#94a3b8",background:i===genStep?"#e0f2fe":"white",borderRadius:20,padding:"4px 10px",animation:"pulse 2s ease-in-out infinite",boxShadow:"0 1px 4px rgba(0,0,0,0.06)",fontWeight:i===genStep?700:400,transition:"all 0.3s"}}>{s}</span>
+            </button>
           ))}
         </div>
+        <button onClick={()=>setScreen("lang")} style={{marginTop:20,padding:"8px 16px",borderRadius:8,background:"#f1f5f9",color:"#64748b",border:"none",fontSize:12,cursor:"pointer",width:"100%"}}>
+          ← {lang==="hi"?"भाषा बदलें":lang==="mr"?"भाषा बदला":"Change Language"}
+        </button>
       </div>
     </div>
   );
 
-  // ── REPORT ──
-  if (screen==="report" && fisResult && scssResult) {
-    return <CombinedReport fisResult={fisResult} scss={scssResult} narrative={narrative} childInfo={childInfo} t={t} onNew={reset}/>;
-  }
+  // ── SCREEN: INSTRUCTION LETTER ────────────────────────────
+  if (screen === "letter") return (
+    <div style={{fontFamily:"'Segoe UI',system-ui,sans-serif",background:"#f0f4f8",minHeight:"100vh",padding:"24px 16px"}}>
+      <div style={{maxWidth:680,margin:"0 auto"}}>
+        {/* Letterhead */}
+        <div style={{background:"linear-gradient(135deg,#0d5c6e,#0d9488)",borderRadius:"14px 14px 0 0",padding:"24px 32px",color:"#fff"}}>
+          <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:16}}>
+            <div style={{width:50,height:50,borderRadius:10,background:"rgba(255,255,255,0.18)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              <svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="20" cy="13" r="4" fill="#5DCAA5"/>
+                <circle cx="12" cy="20" r="3" fill="#9FE1CB"/>
+                <circle cx="28" cy="20" r="3" fill="#9FE1CB"/>
+                <circle cx="16" cy="30" r="3.5" fill="#1D9E75"/>
+                <circle cx="24" cy="30" r="3.5" fill="#1D9E75"/>
+                <line x1="20" y1="17" x2="12" y2="20" stroke="#9FE1CB" strokeWidth="1" opacity="0.9"/>
+                <line x1="20" y1="17" x2="28" y2="20" stroke="#9FE1CB" strokeWidth="1" opacity="0.9"/>
+                <line x1="12" y1="23" x2="16" y2="30" stroke="#5DCAA5" strokeWidth="1" opacity="0.8"/>
+                <line x1="28" y1="23" x2="24" y2="30" stroke="#5DCAA5" strokeWidth="1" opacity="0.8"/>
+                <line x1="12" y1="23" x2="24" y2="30" stroke="#9FE1CB" strokeWidth="0.7" opacity="0.35"/>
+                <line x1="28" y1="23" x2="16" y2="30" stroke="#9FE1CB" strokeWidth="0.7" opacity="0.35"/>
+              </svg>
+            </div>
+            <div>
+              <h1 style={{margin:0,fontSize:18,fontWeight:900}}>eSMART-P</h1>
+              <p style={{margin:0,fontSize:11,opacity:0.75}}>Central Institute of Behavioural Sciences, Nagpur</p>
+            </div>
+          </div>
+          <div style={{borderTop:"1px solid rgba(255,255,255,0.25)",paddingTop:14}}>
+            <h2 style={{margin:"0 0 4px",fontSize:16,fontWeight:700}}>{ltr.heading}</h2>
+            <p style={{margin:0,fontSize:11,opacity:0.8,whiteSpace:"pre-line"}}>{ltr.from}</p>
+          </div>
+        </div>
+        {/* Letter body */}
+        <div style={{background:"#fff",padding:"28px 32px",borderLeft:"1px solid #e2e8f0",borderRight:"1px solid #e2e8f0",lineHeight:1.8}}>
+          {ltr.body.map((para, i) => (
+            <p key={i} style={{margin:"0 0 16px",fontSize:14,color:"#374151",lineHeight:1.8}}>{para}</p>
+          ))}
+          <p style={{margin:"24px 0 0",fontSize:14,color:"#374151",fontStyle:"italic"}}>{ltr.closing}</p>
+          <div style={{marginTop:24,paddingTop:16,borderTop:"1px solid #f1f5f9"}}>
+            <p style={{margin:0,fontSize:13,fontWeight:700,color:"#0d5c6e"}}>Dr. Shailesh Pangaonkar</p>
+            <p style={{margin:"2px 0 0",fontSize:12,color:"#64748b"}}>Director and Consultant Psychiatrist · CIBS Nagpur</p>
+            <p style={{margin:"2px 0 0",fontSize:12,color:"#64748b"}}>MBBS, DPM, DNB, MSc BA</p>
+          </div>
+        </div>
+        {/* Footer actions */}
+        <div style={{background:"#f8fafc",border:"1px solid #e2e8f0",borderRadius:"0 0 14px 14px",padding:"16px 32px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <button onClick={()=>setScreen("role")} style={{padding:"10px 20px",borderRadius:8,background:"#f1f5f9",color:"#64748b",border:"none",fontSize:13,cursor:"pointer"}}>← {lang==="hi"?"वापस":lang==="mr"?"मागे":"Back"}</button>
+          <button onClick={()=>setScreen("disclaimer")} style={{padding:"12px 28px",borderRadius:10,background:"#0d5c6e",color:"#fff",border:"none",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+            {lang==="hi"?"आगे: अस्वीकरण →":lang==="mr"?"पुढे: अस्वीकरण →":"Next: Disclaimer →"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
-  return null;
+  // ── SCREEN: DISCLAIMER ────────────────────────────────────
+  if (screen === "disclaimer") return (
+    <div style={{fontFamily:"'Segoe UI',system-ui,sans-serif",background:"#f0f4f8",minHeight:"100vh",padding:"24px 16px",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{maxWidth:640,width:"100%",background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 4px 24px rgba(0,0,0,0.1)"}}>
+        {/* Header */}
+        <div style={{background:"#fff7ed",borderBottom:"2px solid #fed7aa",padding:"20px 28px",display:"flex",gap:14,alignItems:"flex-start"}}>
+          <span style={{fontSize:28,flexShrink:0}}>⚖️</span>
+          <div>
+            <h2 style={{margin:0,fontSize:16,fontWeight:800,color:"#9a3412"}}>{dis.title}</h2>
+            <p style={{margin:"4px 0 0",fontSize:12,color:"#c2410c"}}>
+              {lang==="hi"?"कृपया आगे बढ़ने से पहले ध्यान से पढ़ें":lang==="mr"?"कृपया पुढे जाण्यापूर्वी काळजीपूर्वक वाचा":"Please read carefully before proceeding"}
+            </p>
+          </div>
+        </div>
+        {/* Points */}
+        <div style={{padding:"24px 28px"}}>
+          {dis.points.map((pt, i) => (
+            <div key={i} style={{display:"flex",gap:12,marginBottom:14,alignItems:"flex-start"}}>
+              <div style={{minWidth:24,height:24,borderRadius:"50%",background:i===0||i===1?"#fef2f2":"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:i===0||i===1?"#dc2626":"#16a34a",flexShrink:0,marginTop:1}}>{i+1}</div>
+              <p style={{margin:0,fontSize:13,color:"#374151",lineHeight:1.6}}>{pt}</p>
+            </div>
+          ))}
+          {/* CIBS Seal */}
+          <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:10,padding:"12px 16px",marginTop:16,display:"flex",gap:12,alignItems:"center"}}>
+            <span style={{fontSize:20}}>🏥</span>
+            <div>
+              <p style={{margin:0,fontSize:12,fontWeight:700,color:"#1d4ed8"}}>Central Institute of Behavioural Sciences (CIBS), Nagpur</p>
+              <p style={{margin:0,fontSize:11,color:"#64748b"}}>Ethics Committee Approved · ICMR Guidelines Compliant · ICH-GCP Standards</p>
+            </div>
+          </div>
+          {/* Agree checkbox */}
+          <label style={{display:"flex",gap:12,alignItems:"flex-start",marginTop:20,cursor:"pointer",padding:"14px 16px",background:agreed?"#f0fdf4":"#f8fafc",borderRadius:10,border:`2px solid ${agreed?"#86efac":"#e2e8f0"}`,transition:"all 0.2s"}}>
+            <input type="checkbox" checked={agreed} onChange={e=>setAgreed(e.target.checked)} style={{width:18,height:18,marginTop:1,cursor:"pointer",accentColor:"#0d9488"}}/>
+            <span style={{fontSize:13,fontWeight:600,color:agreed?"#15803d":"#374151",lineHeight:1.5}}>{dis.agree}</span>
+          </label>
+        </div>
+        {/* Footer */}
+        <div style={{background:"#f8fafc",borderTop:"1px solid #e2e8f0",padding:"14px 28px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <button onClick={()=>setScreen("letter")} style={{padding:"10px 20px",borderRadius:8,background:"#f1f5f9",color:"#64748b",border:"none",fontSize:13,cursor:"pointer"}}>← {lang==="hi"?"वापस":lang==="mr"?"मागे":"Back"}</button>
+          <button onClick={()=>{ if(agreed){ setScreen("form"); setStep(1); } }} disabled={!agreed}
+            style={{padding:"12px 28px",borderRadius:10,background:agreed?"#0d5c6e":"#e2e8f0",color:agreed?"#fff":"#94a3b8",border:"none",fontSize:14,fontWeight:700,cursor:agreed?"pointer":"not-allowed",transition:"all 0.2s"}}>
+            {dis.proceed}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{fontFamily:"'Segoe UI',system-ui,sans-serif",background:"#f0f4f8",minHeight:"100vh"}}>
+      <style>{`@media print{body{background:white!important}button{display:none!important}}`}</style>
+
+      {/* ── HEADER ── */}
+      <div style={{background:"linear-gradient(135deg,#0d3b47 0%,#0d5c6e 55%,#0d9488 100%)",padding:"20px 24px 0",boxShadow:"0 4px 20px rgba(0,0,0,0.25)"}}>
+        <div style={{maxWidth:880,margin:"0 auto"}}>
+          <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:20}}>
+            <div style={{width:46,height:46,borderRadius:10,background:"rgba(255,255,255,0.14)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="16" cy="9" r="3.5" fill="#5DCAA5"/>
+                <circle cx="8"  cy="16" r="2.5" fill="#9FE1CB"/>
+                <circle cx="24" cy="16" r="2.5" fill="#9FE1CB"/>
+                <circle cx="11" cy="24" r="3" fill="#1D9E75"/>
+                <circle cx="21" cy="24" r="3" fill="#1D9E75"/>
+                <line x1="16" y1="12" x2="8"  y2="16" stroke="#9FE1CB" strokeWidth="1" opacity="0.9"/>
+                <line x1="16" y1="12" x2="24" y2="16" stroke="#9FE1CB" strokeWidth="1" opacity="0.9"/>
+                <line x1="8"  y1="18" x2="11" y2="24" stroke="#5DCAA5" strokeWidth="1" opacity="0.8"/>
+                <line x1="24" y1="18" x2="21" y2="24" stroke="#5DCAA5" strokeWidth="1" opacity="0.8"/>
+                <line x1="8"  y1="18" x2="21" y2="24" stroke="#9FE1CB" strokeWidth="0.7" opacity="0.3"/>
+                <line x1="24" y1="18" x2="11" y2="24" stroke="#9FE1CB" strokeWidth="0.7" opacity="0.3"/>
+              </svg>
+            </div>
+            <div style={{flex:1}}>
+              <h1 style={{margin:0,fontSize:20,fontWeight:900,color:"#fff"}}>{t.appTitle}</h1>
+              <p style={{margin:0,fontSize:11,color:"rgba(255,255,255,0.65)"}}>{t.appSubtitle} · {t.appOrg}</p>
+            </div>
+            <div style={{display:"flex",gap:5}}>
+              {["en","hi","mr"].map(l=>(
+                <button key={l} onClick={()=>setLang(l)} style={{padding:"4px 9px",borderRadius:6,fontSize:11,fontWeight:700,cursor:"pointer",background:lang===l?"rgba(255,255,255,0.9)":"rgba(255,255,255,0.15)",color:lang===l?"#0d5c6e":"#fff",border:"none"}}>{l.toUpperCase()}</button>
+              ))}
+            </div>
+          </div>
+          <PBar step={step} steps={t.steps}/>
+        </div>
+      </div>
+
+      {/* ── CONTENT ── */}
+      <div style={{maxWidth:880,margin:"0 auto",padding:"24px 16px"}}>
+        <div style={{background:"#fff",borderRadius:14,padding:24,boxShadow:"0 2px 12px rgba(0,0,0,0.07)",border:"1px solid #e2e8f0"}}>
+
+          {/* ══ STEP 1 — CHILD INFO ══ */}
+          {step===1 && <div>
+            <div style={{background:"#f8fafc",borderRadius:12,padding:18,marginBottom:14,border:"1px solid #e2e8f0"}}>
+              <h3 style={{margin:"0 0 14px",fontSize:15,fontWeight:700,color:"#0d5c6e"}}>👶 {t.childInfo}</h3>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                {<div style={{gridColumn:"1/-1"}}><label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.childName}</label><input type="text" value={ci['name']} onChange={e=>updCi('name',e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",outline:"none",boxSizing:"border-box",background:"#fff"}}/></div>}
+                {<div style={{gridColumn:"auto"}}><label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.childAge}</label><input type="number" value={ci['age']} onChange={e=>updCi('age',e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",outline:"none",boxSizing:"border-box",background:"#fff"}}/></div>}
+                <div>
+                  <label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.dob}</label>
+                  <input type="date" value={ci.dob} onChange={e=>updCi("dob",e.target.value)}
+                    style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",outline:"none",boxSizing:"border-box",background:"#fff"}}/>
+                </div>
+                <div>
+                  <label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.childGender}</label>
+                  <select value={ci.gender} onChange={e=>updCi("gender",e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",background:"#fff"}}>
+                    <option value="">{t.selectDots}</option>
+                    {[t.genderM,t.genderF,t.genderO].map(g=><option key={g}>{g}</option>)}
+                  </select>
+                </div>
+                {<div style={{gridColumn:"auto"}}><label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.fileNo}</label><input type="text" value={ci['fileNo']} onChange={e=>updCi('fileNo',e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",outline:"none",boxSizing:"border-box",background:"#fff"}}/></div>}
+                {<div style={{gridColumn:"auto"}}><label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.regNo}</label><input type="text" value={ci['regNo']} onChange={e=>updCi('regNo',e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",outline:"none",boxSizing:"border-box",background:"#fff"}}/></div>}
+                {<div style={{gridColumn:"auto"}}><label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.school}</label><input type="text" value={ci['school']} onChange={e=>updCi('school',e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",outline:"none",boxSizing:"border-box",background:"#fff"}}/></div>}
+                {<div style={{gridColumn:"auto"}}><label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.dateAssessment}</label><input type="date" value={ci['date']} onChange={e=>updCi('date',e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",outline:"none",boxSizing:"border-box",background:"#fff"}}/></div>}
+                {<div style={{gridColumn:"auto"}}><label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.examiner}</label><input type="text" value={ci['examiner']} onChange={e=>updCi('examiner',e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",outline:"none",boxSizing:"border-box",background:"#fff"}}/></div>}
+              </div>
+            </div>
+
+            {/* Age group preview — live feedback */}
+            {(ci.dob||ci.age) && (
+              <div style={{background:badge.bg,border:`1.5px solid ${badge.border}`,borderRadius:10,padding:"10px 14px",marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
+                <span style={{fontSize:20}}>{badge.icon}</span>
+                <div>
+                  <p style={{margin:0,fontSize:12,color:badge.color,fontWeight:700}}>{t.ageGroupDetected}: <strong>{ageInfo.label}</strong>{ageInfo.age ? ` (${ageInfo.age.toFixed(1)} yrs)`:""}</p>
+                  <p style={{margin:0,fontSize:11,color:badge.color,opacity:0.8}}>{t.ageGroupNote}</p>
+                </div>
+              </div>
+            )}
+
+            <div style={{background:"#f8fafc",borderRadius:12,padding:18,marginBottom:14,border:"1px solid #e2e8f0"}}>
+              <h3 style={{margin:"0 0 14px",fontSize:15,fontWeight:700,color:"#0d5c6e"}}>🧑‍🤝‍🧑 {t.informantDetails}</h3>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                {<div style={{gridColumn:"auto"}}><label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.informantName}</label><input type="text" value={ci['informantName']} onChange={e=>updCi('informantName',e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",outline:"none",boxSizing:"border-box",background:"#fff"}}/></div>}
+                <div>
+                  <label style={{display:"block",fontSize:12,fontWeight:600,color:"#475569",marginBottom:4}}>{t.relation}</label>
+                  <select value={ci.relation} onChange={e=>updCi("relation",e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:14,color:"#1e293b",background:"#fff"}}>
+                    <option value="">{t.selectDots}</option>
+                    {[t.relMother,t.relFather,t.relGrand,t.relGuard,t.relTeacher,t.relOther].map(r=><option key={r}>{r}</option>)}
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:10,padding:12,marginBottom:14,fontSize:13,color:"#1e40af"}}>📋 {t.instChild}</div>
+            <div style={{display:"flex",justifyContent:"flex-end"}}>{btn(t.nextPerinatal,()=>setStep(2),"#0d5c6e",!ci.name||!ci.age||!ci.gender)}</div>
+          </div>}
+
+          {/* ══ STEP 2 — PERINATAL ══ */}
+          {step===2 && <div>
+            <div style={{background:"#fffbeb",border:"1px solid #fcd34d",borderRadius:10,padding:12,marginBottom:14,fontSize:13,color:"#92400e"}}>📌 {t.instPerinatal}</div>
+            <div style={{background:"#fff",border:"1px solid #e2e8f0",borderRadius:12,overflow:"hidden"}}>
+              {PERINATAL.map((item,idx)=>(
+                <div key={item.id} style={{display:"flex",alignItems:"flex-start",gap:12,padding:"12px 16px",borderBottom:"1px solid #f1f5f9",background:p[item.id]==="yes"?"#fffbeb":idx%2===0?"#fff":"#fafafa"}}>
+                  <span style={{minWidth:24,height:24,borderRadius:"50%",background:"#e2e8f0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:"#64748b",flexShrink:0,marginTop:2}}>{item.id}</span>
+                  <div style={{flex:1}}>
+                    <p style={{margin:"0 0 8px",fontSize:14,color:"#1e293b",fontWeight:500,lineHeight:1.4}}>{gl(item)}</p>
+                    <div style={{display:"flex",gap:8}}>
+                      {[["yes",t.yes,"#d97706","#fffbeb"],["no",t.no,"#16a34a","#f0fdf4"],["dk",t.dontKnow,"#64748b","#f8fafc"]].map(([v,l,c,bg])=>(
+                        <button key={v} onClick={()=>updP(item.id,v)} style={{padding:"4px 10px",borderRadius:6,fontSize:12,fontWeight:600,cursor:"pointer",background:p[item.id]===v?bg:"#fff",border:`1.5px solid ${p[item.id]===v?c:"#e2e8f0"}`,color:p[item.id]===v?c:"#94a3b8"}}>{l}</button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:20}}>
+              {btn(t.back,()=>setStep(1),"#64748b")}
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:12,color:"#94a3b8"}}>{Object.keys(p).length}/{PERINATAL.length} {t.answered}</span>
+                {btn(t.nextBehaviour,()=>setStep(3))}
+              </div>
+            </div>
+          </div>}
+
+          {/* ══ STEP 3 — BEHAVIOUR (age-adaptive, seamless) ══ */}
+          {step===3 && <div>
+            {/* Age group banner */}
+            <div style={{background:badge.bg,border:`1.5px solid ${badge.border}`,borderRadius:10,padding:"10px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:20}}>{badge.icon}</span>
+              <div style={{flex:1}}>
+                <p style={{margin:0,fontSize:13,color:badge.color,fontWeight:700}}>{t.ageGroupDetected}: {ageInfo.label}</p>
+                <p style={{margin:0,fontSize:11,color:badge.color,opacity:0.8}}>{t.ageGroupNote}</p>
+              </div>
+              {!ci.dob && !ci.age && <p style={{margin:0,fontSize:11,color:"#d97706"}}>{t.ageGroupManual}</p>}
+            </div>
+            <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:10,padding:12,marginBottom:14,fontSize:13,color:"#1e40af"}}>
+              📝 {t.instBehaviour}
+              <div style={{marginTop:8,display:"flex",gap:5,flexWrap:"wrap"}}>
+                {LIKERT.map(o=><span key={o.v} style={{padding:"2px 7px",borderRadius:8,fontSize:10,fontWeight:600,background:o.bg,color:o.text,border:`1px solid ${o.border}`}}>{o.v} = {gll(o)}</span>)}
+              </div>
+            </div>
+            <div style={{background:"#fff",borderRadius:12,overflow:"hidden",border:"1px solid #e2e8f0"}}>
+              {items.map((item,idx)=>(
+                <div key={item.id} style={{padding:"14px 16px",borderBottom:"1px solid #f1f5f9",background:idx%2===0?"#fff":"#fafafa"}}>
+                  <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:10}}>
+                    <span style={{minWidth:26,height:26,borderRadius:"50%",background:"#e2e8f0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:"#64748b",flexShrink:0,marginTop:1}}>{item.seq}</span>
+                    <p style={{margin:0,fontSize:14,color:"#1e293b",fontWeight:500,lineHeight:1.4}}>{gl(item)}</p>
+                  </div>
+                  <div style={{display:"flex",gap:5,paddingLeft:36,flexWrap:"wrap"}}>
+                    {LIKERT.map(o=>(
+                      <button key={o.v} onClick={()=>updBx(item.id,o.v)} style={{flex:1,minWidth:0,padding:"6px 3px",borderRadius:6,cursor:"pointer",background:bx[item.id]===o.v?o.bg:"#f8fafc",border:`1.5px solid ${bx[item.id]===o.v?o.border:"#e2e8f0"}`,color:bx[item.id]===o.v?o.text:"#94a3b8",textAlign:"center"}}>
+                        <div style={{fontSize:16,fontWeight:800,color:bx[item.id]===o.v?o.text:"#cbd5e1"}}>{o.v}</div>
+                        <div style={{fontSize:8,lineHeight:1.2}}>{gll(o)}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:20}}>
+              {btn(t.back,()=>setStep(2),"#64748b")}
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:12,color:ANS===items.length?"#16a34a":"#94a3b8",fontWeight:600}}>{ANS}/{items.length} {t.answered}</span>
+                {btn(t.generateReport,()=>{ setStep(4); const ok=submitToDatabank_P(ci,ageInfo,p,bx,S,RL,SF,sm); setDbSubmitted(ok); })}
+              </div>
+            </div>
+          </div>}
+
+          {/* ══ STEP 4 — REPORT ══ */}
+          {step===4 && <div>
+            {/* Report header */}
+            <div style={{background:"linear-gradient(135deg,#0d5c6e,#0d9488)",borderRadius:12,padding:20,marginBottom:14,color:"#fff"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                <div>
+                  <h2 style={{margin:0,fontSize:17,fontWeight:800}}>{t.reportTitle}</h2>
+                  <p style={{margin:"3px 0 0",fontSize:11,opacity:0.7}}>{t.appOrg}</p>
+                  <div style={{marginTop:6,display:"inline-flex",alignItems:"center",gap:6,background:"rgba(255,255,255,0.15)",borderRadius:8,padding:"4px 10px"}}>
+                    <span style={{fontSize:14}}>{badge.icon}</span>
+                    <span style={{fontSize:12,fontWeight:600}}>{ageInfo.label}</span>
+                  </div>
+                </div>
+                <div style={{textAlign:"right",fontSize:11,opacity:0.8}}><p style={{margin:0}}>{ci.date}</p><p style={{margin:"2px 0 0"}}>{ci.examiner||"—"}</p></div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+                {[[t.childName,ci.name],[`${t.childAge}/${t.childGender}`,`${ci.age}y / ${ci.gender}`],[t.dob,ci.dob||"—"],[t.fileNo,ci.fileNo||"—"],[t.regNo,ci.regNo||"—"],[t.school,ci.school||"—"],[t.examiner,ci.examiner||"—"],[t.informantName,`${ci.informantName||"—"} (${ci.relation||"—"})`]].map(([l,v])=>(
+                  <div key={l} style={{background:"rgba(255,255,255,0.14)",borderRadius:7,padding:"7px 10px"}}>
+                    <p style={{margin:0,fontSize:9,opacity:0.65}}>{l}</p>
+                    <p style={{margin:0,fontSize:12,fontWeight:700}}>{v||"—"}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Tab switcher */}
+            <div style={{display:"flex",marginBottom:14,background:"#f1f5f9",borderRadius:10,padding:4}}>
+              {[["parent","📋 "+t.forParent],["clinician","🩺 "+t.forClinician]].map(([tb,lbl])=>(
+                <button key={tb} onClick={()=>setTab(tb)} style={{flex:1,padding:"9px 14px",borderRadius:8,border:"none",cursor:"pointer",fontWeight:700,fontSize:13,background:tab===tb?"#fff":"transparent",color:tab===tb?"#0d5c6e":"#64748b",boxShadow:tab===tb?"0 1px 4px rgba(0,0,0,0.08)":"none"}}>{lbl}</button>
+              ))}
+            </div>
+
+            {/* ── PARENT TAB ── */}
+            {tab==="parent" && <>
+              <div style={{background:RL.bg,border:`2px solid ${RL.border}`,borderRadius:12,padding:16,marginBottom:14}}>
+                <div style={{display:"flex",alignItems:"center",gap:12}}>
+                  <div style={{width:50,height:50,borderRadius:"50%",background:RL.color,display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>{["✅","🟡","🟠","🔴"][RL.lv]}</div>
+                  <div style={{flex:1}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}>
+                      <span style={{padding:"3px 10px",borderRadius:20,background:RL.color,color:"#fff",fontSize:11,fontWeight:800}}>{RL.tag}</span>
+                      <strong style={{fontSize:15,color:RL.color}}>{RL.label}</strong>
+                    </div>
+                    <p style={{margin:0,fontSize:13,color:"#374151",lineHeight:1.5}}>{RL.action}</p>
+                    {RL.domains.length>0&&<p style={{margin:"5px 0 0",fontSize:12,color:"#6b7280"}}>Affected: {RL.domains.join(", ")}</p>}
+                  </div>
+                </div>
+              </div>
+
+              {SF && <div style={{background:"#fff1f2",border:"2px solid #f43f5e",borderRadius:12,padding:16,marginBottom:14}}>
+                <div style={{display:"flex",gap:12}}>
+                  <span style={{fontSize:22,flexShrink:0}}>🚨</span>
+                  <div style={{flex:1}}>
+                    <h4 style={{margin:"0 0 5px",fontSize:14,fontWeight:800,color:"#be123c"}}>{t.suicideFlag}</h4>
+                    <p style={{margin:0,fontSize:13,color:"#9f1239",lineHeight:1.5}}>{t.suicideFlagDesc}</p>
+                    <button onClick={()=>setSmEx(!smEx)} style={{marginTop:10,padding:"5px 12px",background:"#be123c",color:"#fff",border:"none",borderRadius:7,fontSize:12,fontWeight:700,cursor:"pointer"}}>{smEx?t.closeMini:t.openMini}</button>
+                    {smEx && <div style={{marginTop:12,background:"#fff",borderRadius:9,padding:14,border:"1px solid #fda4af"}}>
+                      <p style={{margin:"0 0 10px",fontSize:11,color:"#6b7280",fontStyle:"italic"}}>{t.miniNote}</p>
+                      {SM.map(item=>(
+                        <div key={item.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+                          <span style={{fontSize:13,color:"#374151",flex:1}}>{gl(item)}</span>
+                          <div style={{display:"flex",gap:5,marginLeft:10}}>
+                            {[["YES",true,"#dc2626","#fef2f2"],["NO",false,"#16a34a","#f0fdf4"]].map(([l,v,c,bg])=>(
+                              <button key={l} onClick={()=>updSm(item.id,v)} style={{padding:"3px 10px",borderRadius:6,fontSize:11,fontWeight:700,cursor:"pointer",background:sm[item.id]===v?bg:"#f8fafc",border:`1.5px solid ${sm[item.id]===v?c:"#e2e8f0"}`,color:sm[item.id]===v?c:"#94a3b8"}}>{l}</button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                      {SPO&&<div style={{marginTop:10,padding:10,background:"#fef2f2",borderRadius:7,border:"1px solid #fca5a5"}}><strong style={{color:"#dc2626",fontSize:12}}>⚠️ {t.severeImmediate}</strong></div>}
+                    </div>}
+                  </div>
+                </div>
+              </div>}
+
+              {AFF.length>0 && <div style={{background:"#fff",border:"1.5px solid #e2e8f0",borderRadius:12,padding:16,marginBottom:14}}>
+                <h4 style={{margin:"0 0 5px",fontSize:14,fontWeight:700,color:"#374151"}}>🏥 {t.probableDSM}</h4>
+                <p style={{margin:"0 0 10px",fontSize:11,color:"#94a3b8",fontStyle:"italic"}}>{t.screenerNote}</p>
+                {AFF.map(([d,sc])=>{const cfg=DCFG[d];const sv=sc.sev; return (
+                  <div key={d} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+                    <div style={{width:9,height:9,borderRadius:"50%",background:cfg.color,flexShrink:0}}/>
+                    <span style={{fontSize:13,color:"#374151",flex:1,fontWeight:500}}>{cfg.dsm5}</span>
+                    <span style={{fontSize:11,color:"#94a3b8",marginRight:6}}>ICD-11: {cfg.icd11}</span>
+                    <span style={{padding:"3px 9px",borderRadius:12,fontSize:11,fontWeight:700,background:sevB[sv],color:sevC[sv]}}>{t.severity[sv]}</span>
+                  </div>
+                );})}
+              </div>}
+
+              <div style={{background:PR.bg,border:`1.5px solid ${PR.color}40`,borderRadius:12,padding:14,marginBottom:14}}>
+                <h4 style={{margin:"0 0 8px",fontSize:14,fontWeight:700,color:PR.color}}>🤰 {t.perinatalRisk}</h4>
+                <p style={{margin:"0 0 6px",fontSize:13,color:"#374151"}}><strong>{PR.n}</strong> of 14 perinatal risk factors reported</p>
+                <span style={{padding:"3px 10px",borderRadius:12,background:PR.color,color:"#fff",fontSize:11,fontWeight:700}}>{PR.level} Perinatal Risk</span>
+                {PERINATAL.filter(i=>p[i.id]==="yes").map(i=><p key={i.id} style={{margin:"4px 0 0",fontSize:12,color:"#6b7280"}}>• {gl(i)}</p>)}
+              </div>
+
+              <div style={{background:"#faf5ff",border:"1.5px solid #d8b4fe",borderRadius:12,padding:14,marginBottom:14}}>
+                <h4 style={{margin:"0 0 10px",fontSize:14,fontWeight:700,color:"#7c3aed"}}>⚠️ {t.futureRisk}</h4>
+                {FR.map(r=>(
+                  <div key={r.label} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",borderBottom:"1px solid #ede9fe"}}>
+                    <span>{r.icon}</span><span style={{fontSize:13,color:"#374151",flex:1}}>{r.label}</span>
+                    <span style={{padding:"2px 8px",borderRadius:10,fontSize:11,fontWeight:700,background:r.up?"#fef2f2":"#f0fdf4",color:r.up?"#dc2626":"#16a34a"}}>{r.up?"⬆ Elevated":"✓ Not indicated"}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{background:"#f0fdf4",border:"1.5px solid #86efac",borderRadius:12,padding:16,marginBottom:14}}>
+                <h4 style={{margin:"0 0 8px",fontSize:14,fontWeight:700,color:"#15803d"}}>📋 {t.forParent}</h4>
+                <p style={{margin:0,fontSize:14,color:"#166534",lineHeight:1.7}}>
+                  <strong>{ci.name||"Your child"}</strong> ({ageInfo.label}) — <strong>{RL.label}</strong>.<br/>
+                  {t.parentSummary[RL.lv]}
+                  {SF&&" ⚠️ An important safety concern was also identified — please speak with the clinician immediately."}
+                </p>
+              </div>
+            </>}
+
+            {/* ── CLINICIAN TAB ── */}
+            {tab==="clinician" && <>
+              <div style={{background:"#fff",border:"1.5px solid #e2e8f0",borderRadius:12,padding:16,marginBottom:14}}>
+                <h4 style={{margin:"0 0 14px",fontSize:14,fontWeight:700,color:"#374151"}}>📊 {t.domainChart}</h4>
+                <BarChart s={S} t={t}/>
+              </div>
+              <div style={{background:"#fff",border:"1.5px solid #e2e8f0",borderRadius:12,overflow:"hidden",marginBottom:14}}>
+                <div style={{background:"#0d5c6e",padding:"9px 16px",display:"grid",gridTemplateColumns:"1fr 2fr 60px 60px 70px 90px",gap:8}}>
+                  {["Domain","Disorder","Score","Max","%","Severity"].map(h=><span key={h} style={{fontSize:11,fontWeight:700,color:"#fff"}}>{h}</span>)}
+                </div>
+                {Object.entries(DCFG).map(([d,c])=>{const sc=S[d];const sv=sc.sev; return (
+                  <div key={d} style={{padding:"9px 16px",display:"grid",gridTemplateColumns:"1fr 2fr 60px 60px 70px 90px",gap:8,alignItems:"center",borderBottom:"1px solid #f1f5f9"}}>
+                    <span style={{fontSize:13,fontWeight:700,color:c.color}}>{d}</span>
+                    <span style={{fontSize:12,color:"#374151"}}>{c.dsm5}</span>
+                    <span style={{fontSize:13,fontWeight:700}}>{sc.total}</span>
+                    <span style={{fontSize:12,color:"#94a3b8"}}>{c.max}</span>
+                    <span style={{fontSize:12}}>{sc.pct}%</span>
+                    <span style={{padding:"3px 9px",borderRadius:10,fontSize:11,fontWeight:700,background:sevB[sv],color:sevC[sv]}}>{t.severity[sv]}</span>
+                  </div>
+                );})}
+              </div>
+              <div style={{background:"#fff",border:"1.5px solid #e2e8f0",borderRadius:12,overflow:"hidden",marginBottom:14}}>
+                <div style={{background:"#374151",padding:"9px 16px"}}><span style={{fontSize:13,fontWeight:700,color:"#fff"}}>Risk Classification Summary</span></div>
+                {[
+                  {l:"Overall Risk",v:RL.label,c:RL.color,bg:RL.bg},
+                  {l:"Age Group",v:ageInfo.label,c:badge.color,bg:badge.bg},
+                  {l:"Suicide / Self-Harm Flag",v:SF?"⚠️ FLAGGED — Immediate Action":"Not triggered",c:SF?"#dc2626":"#16a34a",bg:SF?"#fef2f2":"#dcfce7"},
+                  {l:"Perinatal Risk",v:`${PR.level} (${PR.n}/14)`,c:PR.color,bg:PR.bg},
+                  {l:"Probable Diagnoses",v:AFF.map(([d])=>`${d}[${t.severity[S[d].sev]}]`).join(", ")||"None",c:"#374151",bg:"#f8fafc"},
+                ].map(r=>(
+                  <div key={r.l} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 16px",borderBottom:"1px solid #f1f5f9"}}>
+                    <span style={{fontSize:13,color:"#6b7280",fontWeight:500}}>{r.l}</span>
+                    <span style={{fontSize:12,fontWeight:700,padding:"3px 10px",borderRadius:8,background:r.bg,color:r.c}}>{r.v}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{background:"#fff",border:"1.5px solid #e2e8f0",borderRadius:12,padding:14,marginBottom:14}}>
+                <h4 style={{margin:"0 0 10px",fontSize:14,fontWeight:700,color:"#374151"}}>⚠️ {t.futureRisk}</h4>
+                {FR.map(r=>(
+                  <div key={r.label} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 0",borderBottom:"1px solid #f1f5f9"}}>
+                    <span>{r.icon}</span><span style={{fontSize:13,color:"#374151",flex:1}}>{r.label}</span>
+                    <span style={{padding:"3px 9px",borderRadius:10,fontSize:11,fontWeight:700,background:r.up?"#fef2f2":"#f0fdf4",color:r.up?"#dc2626":"#16a34a"}}>{r.up?"⬆ Elevated":"✓ Not indicated"}</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{padding:12,background:"#f8fafc",borderRadius:9,border:"1px solid #e2e8f0",fontSize:11,color:"#64748b",lineHeight:1.7,marginBottom:14}}>
+                <strong>Algorithm Notes:</strong> Age group auto-detected from DOB (priority) or Age field. Groups: Pre-school &lt;6y · Primary 6–10y · Secondary 11–15y · Higher 16–18y. All 26 items share identical item IDs and scoring algorithm across groups — only question wording adapts. Cutoffs: Normal N=55, Clinical N=281 from CIBS dataset. atRisk = Normal_p90+1; prob = Clinical_p75; sev = max(Clinical_p75+1, 75% of max). MDD atRisk=4/8 (prevents false-positive from single sad item). Suicide flag: ADHD(Mild+) + MDD(≥4) + ODD/CD(Moderate/Severe).
+              </div>
+            </>}
+
+            {/* ── EXPORT & SHARE ── */}
+            <div style={{background:"#fff",border:"1.5px solid #e2e8f0",borderRadius:12,padding:16,marginBottom:14}}>
+              <h4 style={{margin:"0 0 12px",fontSize:14,fontWeight:700,color:"#374151"}}>💾 {t.exportSave}</h4>
+
+              {/* Download row */}
+              <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:14}}>
+                <button onClick={()=>window.print()} style={{padding:"10px 18px",borderRadius:8,background:"#0d5c6e",color:"#fff",border:"none",fontSize:13,fontWeight:700,cursor:"pointer"}}>{t.printPDF}</button>
+                <button onClick={()=>makeCSV(ci,ageInfo,p,bx,S,RL,SF,sm)} style={{padding:"10px 18px",borderRadius:8,background:"#16a34a",color:"#fff",border:"none",fontSize:13,fontWeight:700,cursor:"pointer"}}>{t.downloadCSV}</button>
+              </div>
+
+              {/* Share panel */}
+              <div style={{borderTop:"1px solid #e2e8f0",paddingTop:14,marginBottom:14}}>
+                <p style={{margin:"0 0 10px",fontSize:12,color:"#64748b",fontWeight:700}}>
+                  📲 {lang==="hi"?"इस प्रश्नावली को शेयर करें":lang==="mr"?"ही प्रश्नावली शेअर करा":"Share this questionnaire"}
+                </p>
+                <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                  {[
+                    { method:"whatsapp", label:"WhatsApp",  bg:"#25d366", icon:"💬" },
+                    { method:"email",    label:"Email",     bg:"#ea580c", icon:"📧" },
+                    { method:"sms",      label:"SMS",       bg:"#7c3aed", icon:"📱" },
+                    { method:"copy",     label:lang==="hi"?"लिंक कॉपी करें":lang==="mr"?"लिंक कॉपी करा":"Copy Link", bg:"#0891b2", icon:"🔗" },
+                  ].map(s=>(
+                    <button key={s.method} onClick={()=>shareVia(s.method, ci.name, lang)} style={{padding:"8px 14px",borderRadius:8,background:s.bg,color:"#fff",border:"none",fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>
+                      {s.icon} {s.label}
+                    </button>
+                  ))}
+                </div>
+                <p style={{margin:"8px 0 0",fontSize:11,color:"#94a3b8"}}>
+                  {lang==="hi"?"शेयर करने पर एक संक्षिप्त संदेश और लिंक भेजा जाएगा।":lang==="mr"?"शेअर केल्यावर एक संक्षिप्त संदेश आणि दुवा पाठवला जाईल.":"Sharing will compose a brief message with the tool link for the recipient."}
+                </p>
+              </div>
+
+              {/* Google Sheets sync */}
+              <div style={{borderTop:"1px solid #e2e8f0",paddingTop:12}}>
+                <p style={{margin:"0 0 6px",fontSize:12,color:"#64748b",fontWeight:600}}>📡 {t.sendSheets}</p>
+                <div style={{display:"flex",gap:8}}>
+                  <input type="text" placeholder={t.sheetsPlaceholder} value={shUrl} onChange={e=>setShUrl(e.target.value)} style={{flex:1,padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:12,color:"#1e293b",outline:"none"}}/>
+                  <button onClick={sendSheets} style={{padding:"8px 14px",borderRadius:8,background:"#0d9488",color:"#fff",border:"none",fontSize:13,fontWeight:700,cursor:"pointer"}}>{t.send}</button>
+                  {ci.fileNo && (
+                    <a href={`https://esmart-report.vercel.app?reg=${ci.fileNo}&mode=family&lang=${lang||"en"}`}
+                      target="_blank" rel="noopener noreferrer"
+                      style={{padding:"8px 14px",borderRadius:8,
+                        background:"linear-gradient(135deg,#0d9488,#10b981)",
+                        color:"#fff",border:"none",fontSize:13,fontWeight:700,
+                        cursor:"pointer",textDecoration:"none",display:"inline-block"}}>
+                      📋 {t.familyReport||"Family Report"} →
+                    </a>
+                  )}
+                </div>
+                {shSt&&<p style={{margin:"5px 0 0",fontSize:12,color:shSt.includes("✅")?"#16a34a":"#dc2626"}}>{shSt}</p>}
+              </div>
+            </div>
+
+            {/* Enhanced disclaimer box */}
+            <div style={{background:"#fff7ed",border:"1.5px solid #fed7aa",borderRadius:10,padding:"14px 16px",marginBottom:14}}>
+              <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+                <span style={{fontSize:18,flexShrink:0}}>⚖️</span>
+                <div>
+                  <p style={{margin:"0 0 4px",fontSize:12,fontWeight:700,color:"#9a3412"}}>{lang==="hi"?"सुरक्षा अस्वीकरण":lang==="mr"?"सुरक्षा अस्वीकरण":"Safety Disclaimer"}</p>
+                  <p style={{margin:0,fontSize:11,color:"#c2410c",lineHeight:1.6}}>{t.disclaimer}</p>
+                </div>
+              </div>
+            </div>
+
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <button onClick={reset} style={{padding:"9px 18px",borderRadius:8,background:"#f1f5f9",color:"#475569",border:"none",fontSize:13,fontWeight:600,cursor:"pointer"}}>{t.newAssessment}</button>
+              {dbSubmitted&&<div style={{display:"flex",alignItems:"center",gap:8,padding:"9px 16px",borderRadius:8,background:"#f0fdf4",border:"1px solid #86efac",fontSize:12,fontWeight:700,color:"#15803d"}}>✅ Data submitted to CIBS Databank (File: {ci.fileNo})</div>}
+              <button onClick={()=>setStep(3)} style={{padding:"9px 18px",borderRadius:8,background:"#f1f5f9",color:"#475569",border:"none",fontSize:13,fontWeight:600,cursor:"pointer"}}>{t.editResponses}</button>
+              <button onClick={()=>{setScreen("lang");setLang(null);}} style={{padding:"9px 18px",borderRadius:8,background:"#f1f5f9",color:"#475569",border:"none",fontSize:13,fontWeight:600,cursor:"pointer"}}>🌐 Language</button>
+            </div>
+          </div>}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  return <ErrorBoundary><AppInner/></ErrorBoundary>;
 }

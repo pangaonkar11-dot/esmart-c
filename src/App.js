@@ -1506,7 +1506,7 @@ export default function App() {
           mobile2: ci.mobile2||"",
           email1: ci.email1||"",
           email2: ci.email2||"",
-          city: ci.city||"",, timestamp:new Date().toISOString(), mode:"assisted",
+          city: ci.city||"", timestamp:new Date().toISOString(), mode:"assisted",
           fileNo, uid:"", name:childInfo.examiner||"", dob:"", age:"", gender:"",
           mobile:childInfo.mobile||"", education:"", occupation:"",
           referral:"", assessor:childInfo.examiner||"", notes:"",

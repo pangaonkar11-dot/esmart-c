@@ -1127,8 +1127,11 @@ function CombinedReport({ fisResult, scss, narrative, childInfo, t, onNew }) {
         </div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           <button onClick={()=>window.print()} style={{flex:1,minWidth:130,padding:"10px",background:"#374151",color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>🖨 Print / Save PDF</button>
-          {childInfo?.fileNo && (
-            <a href={`https://esmart-report.vercel.app?reg=${childInfo.fileNo}&mode=family&lang=${lang||"en"}`}
+          {(childInfo?.cFileNo||childInfo?.fileNo) && (() => {
+            const aid = generateAutoID(childInfo.surname||"",childInfo.dob,childInfo.mobile1||childInfo.mobile,childInfo.mobile2||"");
+            const reg = aid.includes("XXX")?(childInfo.cFileNo||childInfo.fileNo):aid;
+            return <>
+              <a href={`https://esmart-report.vercel.app?reg=${reg}&mode=family&lang=${lang||"en"}`}
               target="_blank" rel="noopener noreferrer"
               style={{flex:1,minWidth:130,padding:"10px",background:"linear-gradient(135deg,#0d9488,#10b981)",
                 color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,
@@ -1136,7 +1139,15 @@ function CombinedReport({ fisResult, scss, narrative, childInfo, t, onNew }) {
                 alignItems:"center",justifyContent:"center",gap:4}}>
               📋 {t.forParent||"Family Report"} →
             </a>
-          )}
+            <a href="https://esmart-v.vercel.app"
+              target="_blank" rel="noopener noreferrer"
+              style={{padding:"8px 14px",borderRadius:8,
+                background:"linear-gradient(135deg,#712B13,#9a3a1e)",
+                color:"#fff",border:"none",fontSize:12,fontWeight:700,
+                cursor:"pointer",textDecoration:"none",display:"inline-block"}}>
+              🏥 Open V Workstation →
+            </a>
+            </>; })()}
           <button onClick={onNew} style={{flex:1,minWidth:130,padding:"10px",background:"white",color:"#0d5c6e",border:"1.5px solid #0d5c6e",borderRadius:9,fontSize:12,fontWeight:600,cursor:"pointer"}}>{t.newAssessment}</button>
         </div>
       </div>
@@ -1149,7 +1160,7 @@ function CombinedReport({ fisResult, scss, narrative, childInfo, t, onNew }) {
           <div style={{fontSize:20,fontWeight:700}}>Assessment Summary for Family</div>
           <div style={{fontSize:11,color:"rgba(255,255,255,0.7)",marginTop:2}}>CIBS Nagpur · Dr. Shailesh Pangaonkar</div>
           <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginTop:16}}>
-            {[["Name",childInfo.name||"—"],["Age",`${childInfo.age||"—"} yrs`],["School",childInfo.school||"—"],["Date",today]].map(([l,v])=>(
+            {[["Name",`${childInfo.firstName||""} ${childInfo.surname||childInfo.name||""}`.trim()||"—"],["Age",`${childInfo.age||"—"} yrs`],["School",childInfo.school||"—"],["Date",today]].map(([l,v])=>(
               <div key={l} style={{background:"rgba(255,255,255,0.12)",borderRadius:7,padding:"7px 10px"}}>
                 <div style={{fontSize:9,opacity:0.65}}>{l}</div>
                 <div style={{fontSize:12,fontWeight:700}}>{v}</div>
@@ -1219,7 +1230,7 @@ function CombinedReport({ fisResult, scss, narrative, childInfo, t, onNew }) {
           </div>
           {/* Child info strip */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginTop:16}}>
-            {[["Name",childInfo.name||"—"],["Age",`${childInfo.age||"—"} yrs`],["School",childInfo.school||"—"],["File No.",childInfo.fileNo||"—"]].map(([l,v])=>(
+            {[["Name",`${childInfo.firstName||""} ${childInfo.surname||childInfo.name||""}`.trim()||"—"],["Age",`${childInfo.age||"—"} yrs`],["School",childInfo.school||"—"],["C-File",childInfo.cFileNo||childInfo.fileNo||"—"]].map(([l,v])=>(
               <div key={l} style={{background:"rgba(255,255,255,0.12)",borderRadius:7,padding:"7px 10px"}}>
                 <div style={{fontSize:9,opacity:0.65}}>{l}</div>
                 <div style={{fontSize:12,fontWeight:700}}>{v}</div>
@@ -1603,36 +1614,80 @@ export default function App() {
         <input type={type} value={childInfo[k]} onChange={e=>upd(k,e.target.value)} style={{padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:13,color:"#1e293b",outline:"none",background:"#fafafa"}}/>
       </div>
     );
+    const inp = (label, key, type="text", placeholder="") => (
+      <div style={{marginBottom:0}}>
+        <label style={{fontSize:11,fontWeight:700,color:"#475569",display:"block",marginBottom:4}}>{label}</label>
+        <input type={type} value={childInfo[key]||""} onChange={e=>{
+          upd(key,e.target.value);
+          if(key==="dob"&&e.target.value){const ms=Date.now()-new Date(e.target.value).getTime();upd("age",String(Math.floor(ms/(1000*60*60*24*365.25))));}
+        }} placeholder={placeholder}
+        style={{width:"100%",boxSizing:"border-box",padding:"8px 11px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:13,color:"#1e293b",background:"white",outline:"none"}}/>
+      </div>
+    );
     return (
       <div style={rootStyle}>
-        <div style={cardStyle}>
+        <div style={{...cardStyle,maxWidth:520}}>
           <h2 style={{fontSize:16,fontWeight:800,color:"#0d5c6e",margin:"0 0 16px"}}>👶 {t.childInfo}</h2>
-          {/* FileNo banner */}
-          <div style={{marginBottom:14,padding:"10px 14px",background:"#F5F3FF",borderRadius:8,border:"1px solid #DDD6FE"}}>
-            <label style={{fontSize:11,fontWeight:700,color:"#6D28D9",display:"block",marginBottom:4}}>Registration No. (FileNo) ★</label>
-            {getURLParam("reg")
-              ? <div style={{fontFamily:"monospace",fontSize:15,fontWeight:900,color:"#5B21B6"}}>{childInfo.fileNo}<span style={{fontSize:10,marginLeft:8,color:"#A78BFA"}}>Pre-filled by CIBS</span></div>
-              : <input value={childInfo.fileNo} onChange={e=>upd("fileNo",e.target.value)} placeholder="CIBS-26-0001 (leave blank to auto-generate)" style={{width:"100%",boxSizing:"border-box",padding:"7px 10px",border:"1.5px solid #DDD6FE",borderRadius:7,fontSize:13,fontFamily:"monospace",color:"#5B21B6",background:"white"}}/>
-            }
-          </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
-            <div style={{gridColumn:"1/-1"}}>{fld(t.childName,"name")}</div>
-            {fld(t.dob,"dob","date")}
-            {fld(t.age,"age","number")}
+
+          {/* Auto-ID preview */}
+          {(childInfo.surname&&childInfo.dob&&(childInfo.mobile1||childInfo.mobile2))&&(
+            <div style={{background:"linear-gradient(135deg,#0d3b47,#0d5c6e)",borderRadius:10,
+              padding:"10px 14px",marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontSize:8,color:"rgba(255,255,255,0.5)",textTransform:"uppercase",letterSpacing:"0.12em"}}>Auto-ID (Permanent)</div>
+                <div style={{fontSize:14,fontWeight:800,color:"white",fontFamily:"monospace"}}>
+                  {generateAutoID(childInfo.surname,childInfo.dob,childInfo.mobile1,childInfo.mobile2)}
+                </div>
+              </div>
+              <div style={{fontSize:9,color:"rgba(255,255,255,0.5)",textAlign:"right"}}>Links C+P+V+Weekly</div>
+            </div>
+          )}
+
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+            {inp("CIBS Registration No.","cibsReg","text","e.g. CIBS-26-0042")}
+            {inp("C-File Number","cFileNo","text","e.g. C-0042")}
+            {inp("Child First Name ★","firstName")}
+            {inp("Child Surname ★","surname")}
+            <div style={{gridColumn:"1/-1",display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              {inp("Date of Birth ★","dob","date")}
+              {inp("Age (years)","age","number")}
+            </div>
             <div>
-              <label style={{fontSize:11,fontWeight:600,color:"#475569",display:"block",marginBottom:4}}>{t.gender}</label>
-              <select value={childInfo.gender} onChange={e=>upd("gender",e.target.value)} style={{width:"100%",padding:"8px 12px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:13,color:"#1e293b",background:"#fafafa"}}>
+              <label style={{fontSize:11,fontWeight:700,color:"#475569",display:"block",marginBottom:4}}>Gender ★</label>
+              <select value={childInfo.gender||""} onChange={e=>upd("gender",e.target.value)}
+                style={{width:"100%",padding:"8px 11px",border:"1.5px solid #e2e8f0",borderRadius:8,fontSize:13,background:"white"}}>
                 <option value="">Select...</option>
-                <option value="M">{t.gM}</option><option value="F">{t.gF}</option><option value="O">{t.gO}</option>
+                <option value="M">{t.gM||"Male"}</option>
+                <option value="F">{t.gF||"Female"}</option>
+                <option value="O">{t.gO||"Other"}</option>
               </select>
             </div>
-            {fld(t.grade,"grade")}
-            {fld(t.school,"school")}
-            {fld(t.examiner,"examiner")}
+            {inp("Class / Grade","grade","text","e.g. Class 5")}
+            {inp("Father's Full Name","fatherName")}
+            {inp("Mother's Full Name","motherName")}
+            {inp("Mobile 1 (Father / Primary) ★","mobile1","tel","10-digit")}
+            {inp("Mobile 2 (Mother / Secondary)","mobile2","tel","")}
+            {inp("Email 1","email1","email","")}
+            {inp("Email 2","email2","email","")}
+            <div style={{gridColumn:"1/-1"}}>{inp("School Name","school")}</div>
+            {inp("City","city","text","Nagpur")}
+            {inp("Examiner","examiner")}
           </div>
           <div style={{display:"flex",gap:10}}>
-            <button onClick={()=>setScreen("role")} style={{flex:1,padding:"10px",borderRadius:9,background:"#f1f5f9",color:"#475569",border:"none",fontSize:13,cursor:"pointer"}}>{t.back}</button>
-            <button onClick={()=>setScreen("disclaimer")} disabled={!childInfo.gender} style={{flex:2,padding:"12px",borderRadius:9,background:childInfo.gender?"#0d5c6e":"#e2e8f0",color:childInfo.gender?"#fff":"#94a3b8",border:"none",fontSize:14,fontWeight:700,cursor:childInfo.name?"pointer":"not-allowed"}}>{t.next}</button>
+            <button onClick={()=>setScreen("role")}
+              style={{flex:1,padding:"10px",borderRadius:9,background:"#f1f5f9",
+                color:"#475569",border:"none",fontSize:13,cursor:"pointer"}}>{t.back}</button>
+            <button onClick={()=>{
+              upd("name",(childInfo.firstName||"")+" "+(childInfo.surname||""));
+              upd("fileNo",childInfo.cFileNo||childInfo.fileNo||"");
+              setScreen("disclaimer");
+            }} disabled={!childInfo.gender||!childInfo.dob}
+              style={{flex:2,padding:"12px",borderRadius:9,
+                background:(childInfo.gender&&childInfo.dob)?"#0d5c6e":"#e2e8f0",
+                color:(childInfo.gender&&childInfo.dob)?"#fff":"#94a3b8",
+                border:"none",fontSize:14,fontWeight:700,cursor:(childInfo.gender&&childInfo.dob)?"pointer":"not-allowed"}}>
+              {t.next}
+            </button>
           </div>
         </div>
       </div>

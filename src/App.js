@@ -1460,6 +1460,9 @@ export default function App() {
   const [genStep,    setGenStep]    = useState(0);
   const [fisResult,  setFisResult]  = useState(null);
   const [scssResult, setScssResult] = useState(null);
+  const fisRef  = useRef(null);
+  const scssRef = useRef(null);
+  const narrRef = useRef(null);
   const [narrative,  setNarrative]  = useState(null);
 
   const t = T[lang] || T.en;
@@ -1499,6 +1502,10 @@ export default function App() {
     const narrativeTimeout = new Promise(resolve => setTimeout(() => resolve(null), 8000));
     const narr = await Promise.race([generateNarrative(fis, scss, childInfo), narrativeTimeout]);
     setNarrative(narr);
+    // Store in refs for immediate access (React state updates are async)
+    fisRef.current  = fis;
+    scssRef.current = scss;
+    narrRef.current = narr;
     // ── Push to Google Sheets ──────────────────────────────────────────────
     if (APPS_SCRIPT_URL && !APPS_SCRIPT_URL.startsWith("PASTE_")) {
       const fileNo = (childInfo.fileNo || autoFileNo()).trim();
@@ -1958,8 +1965,23 @@ export default function App() {
   );
 
   // ── REPORT ──
-  if (screen==="report" && fisResult && scssResult) {
-    return <CombinedReport fisResult={fisResult} scss={scssResult} narrative={narrative} childInfo={childInfo} t={t} onNew={reset}/>;
+  if (screen==="report") {
+    const fr = fisResult  || fisRef.current;
+    const sr = scssResult || scssRef.current;
+    const nr = narrative  || narrRef.current;
+    if (fr && sr) {
+      return <CombinedReport fisResult={fr} scss={sr} narrative={nr} childInfo={childInfo} t={t} onNew={reset}/>;
+    }
+    // Still loading
+    return (
+      <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#0d3b47,#0d5c6e)",
+        display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12}}>
+        <div style={{width:48,height:48,border:"4px solid rgba(255,255,255,0.2)",
+          borderTopColor:"#9FE1CB",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
+        <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
+        <p style={{color:"white",fontSize:14,fontWeight:700}}>Preparing report...</p>
+      </div>
+    );
   }
 
   return null;

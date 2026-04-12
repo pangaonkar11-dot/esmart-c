@@ -1477,7 +1477,12 @@ export default function App() {
   };
 
   const runReport = async (scssSeqs) => {
+    // Sync legacy fields from new registration fields
+    const fullName = `${childInfo.firstName||""} ${childInfo.surname||""}`.trim() || childInfo.name || "Subject";
+    const fileNo = childInfo.cFileNo || childInfo.fileNo || autoFileNo();
+    if (!childInfo.name) setChildInfo(p=>({...p, name:fullName, fileNo}));
     setGenerating(true);
+    try {
     const steps = [0,1,2,3,4];
     for (const s of steps) {
       setGenStep(s);
@@ -1500,7 +1505,8 @@ export default function App() {
     setScssResult(scss);
     // Generate narrative — with 8 second timeout fallback
     const narrativeTimeout = new Promise(resolve => setTimeout(() => resolve(null), 8000));
-    const narr = await Promise.race([generateNarrative(fis, scss, childInfo), narrativeTimeout]);
+    const enrichedCI = {...childInfo, name:fullName, fileNo};
+    const narr = await Promise.race([generateNarrative(fis, scss, enrichedCI), narrativeTimeout]);
     setNarrative(narr);
     // Store in refs for immediate access (React state updates are async)
     fisRef.current  = fis;
@@ -1556,6 +1562,9 @@ export default function App() {
           scss_validity:"Valid",
         })
       }).catch(()=>{});
+    }
+    } catch(err) {
+      console.error("Report generation error:", err);
     }
     setGenerating(false);
     setScreen("report");

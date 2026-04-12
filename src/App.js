@@ -1981,7 +1981,7 @@ export default function App() {
     if (fr && sr) {
       return <CombinedReport fisResult={fr} scss={sr} narrative={nr} childInfo={childInfo} t={t} onNew={reset}/>;
     }
-    // Still loading
+    // Data not ready yet - wait and retry
     return (
       <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#0d3b47,#0d5c6e)",
         display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12}}>
@@ -1989,8 +1989,17 @@ export default function App() {
           borderTopColor:"#9FE1CB",borderRadius:"50%",animation:"spin 1s linear infinite"}}/>
         <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
         <p style={{color:"white",fontSize:14,fontWeight:700}}>Preparing report...</p>
+        <p style={{color:"rgba(255,255,255,0.6)",fontSize:12}}>
+          {fisRef.current?"Computing SCSS...":"Computing IQ..."}
+        </p>
       </div>
     );
+  }
+
+  // If we have refs data but screen not set to report yet (race condition)
+  if (fisRef.current && scssRef.current && !generating) {
+    return <CombinedReport fisResult={fisRef.current} scss={scssRef.current}
+      narrative={narrRef.current} childInfo={childInfo} t={t} onNew={reset}/>;
   }
 
   return null;

@@ -1127,10 +1127,25 @@ function CombinedReport({ fisResult, scss, narrative, childInfo, t, onNew }) {
         </div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           <button onClick={()=>window.print()} style={{flex:1,minWidth:130,padding:"10px",background:"#374151",color:"white",border:"none",borderRadius:9,fontSize:12,fontWeight:700,cursor:"pointer"}}>🖨 Print / Save PDF</button>
-          {(childInfo?.cFileNo||childInfo?.fileNo) && (() => {
-            const aid = generateAutoID(childInfo.surname||"",childInfo.dob,childInfo.mobile1||childInfo.mobile,childInfo.mobile2||"");
-            const reg = aid.includes("XXX")?(childInfo.cFileNo||childInfo.fileNo):aid;
+          {(childInfo?.autoID||childInfo?.cFileNo||childInfo?.fileNo) && (() => {
+            const aid = childInfo.autoID || generateAutoID(childInfo.surname||"",childInfo.dob,childInfo.mobile1||childInfo.mobile||"",childInfo.mobile2||"");
+            const reg = (!aid||aid.includes("XXX"))?(childInfo.cFileNo||childInfo.fileNo||""):aid;
             return <>
+              <div style={{background:"#f0fdf4",border:"1px solid #86efac",borderRadius:8,
+                padding:"10px 14px",marginBottom:10,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                <span style={{fontSize:12,color:"#15803d",fontWeight:700}}>✅ Assessment complete</span>
+                <a href="https://esmart-v.vercel.app" target="_blank" rel="noopener noreferrer"
+                  style={{padding:"6px 12px",borderRadius:8,background:"#0d5c6e",color:"white",
+                    fontSize:12,fontWeight:700,textDecoration:"none"}}>
+                  🏥 Open V Workstation →
+                </a>
+                <a href={`https://esmart-report.vercel.app?reg=${reg}&mode=clinical`}
+                  target="_blank" rel="noopener noreferrer"
+                  style={{padding:"6px 12px",borderRadius:8,background:"#1e3a5f",color:"white",
+                    fontSize:12,fontWeight:700,textDecoration:"none"}}>
+                  📋 Combined Report →
+                </a>
+              </div>
               <a href={`https://esmart-report.vercel.app?reg=${reg}&mode=family&lang=${lang||"en"}`}
               target="_blank" rel="noopener noreferrer"
               style={{flex:1,minWidth:130,padding:"10px",background:"linear-gradient(135deg,#0d9488,#10b981)",
@@ -1441,6 +1456,7 @@ export default function App() {
   // CIBS-FIS state
   const [fisPhase,  setFisPhase]  = useState("intro");  // intro|practice|SER|CLS|MAT|CON|done
   const [fisScores, setFisScores] = useState({});
+  const fisPhaseRef = useRef("intro"); // always current fisPhase for callbacks
   const [dbSubmitted_C, setDbSubmitted_C] = useState(false);
   const [pracDone,  setPracDone]  = useState(false);
   const [pracSel,   setPracSel]   = useState(null);
@@ -1480,7 +1496,8 @@ export default function App() {
     // Sync legacy fields from new registration fields
     const fullName = `${childInfo.firstName||""} ${childInfo.surname||""}`.trim() || childInfo.name || "Subject";
     const fileNo = childInfo.cFileNo || childInfo.fileNo || autoFileNo();
-    if (!childInfo.name) setChildInfo(p=>({...p, name:fullName, fileNo}));
+    const autoID = generateAutoID(childInfo.surname||"", childInfo.dob, childInfo.mobile1||childInfo.mobile||"", childInfo.mobile2||"");
+    setChildInfo(p=>({...p, name:fullName, fileNo, autoID}));
     setGenerating(true);
     try {
     const steps = [0,1,2,3,4];
@@ -1811,6 +1828,7 @@ export default function App() {
 
     // Subtests
     const subtestMap = {SER:"CLS", CLS:"MAT", MAT:"CON", CON:"done"};
+    fisPhaseRef.current = fisPhase; // keep ref in sync
     const subtestColors = {SER:"#0d9488",CLS:"#7c3aed",MAT:"#1d4ed8",CON:"#0891b2"};
     const subtestNames = {SER:t.subtests[0],CLS:t.subtests[1],MAT:t.subtests[2],CON:t.subtests[3]};
 
@@ -1819,10 +1837,10 @@ export default function App() {
       const totalSecs = Math.round(stInfo.mins * 60);
       const col = subtestColors[fisPhase];
       const onSubtestComplete = (ans) => {
-        setFisScores(prev => ({...prev, [fisPhase]: ans}));
-        const next = subtestMap[fisPhase];
-        if (next === "done") { setScreen("scss"); }
-        else { setFisPhase(next); }
+        setFisScores(prev => ({...prev, [fisPhaseRef.current]: ans}));
+        const next = subtestMap[fisPhaseRef.current];
+        if (next === "done") { setScreen("scss"); fisPhaseRef.current="done"; }
+        else { fisPhaseRef.current=next; setFisPhase(next); }
       };
       return (
         <div style={rootStyle}>
